@@ -1,0 +1,40 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Runtime outputs
+runs/
+.pytest_cache/
+__pycache__/
+*.pyc
+logs/
+validation_results/
+*.out
+*.err
+nohup.out
+
+# Local/editor files
+.DS_Store
+.vscode/
+.idea/
+*.swp
+
+# Notebooks checkpoints
+.ipynb_checkpoints/
