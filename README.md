@@ -15,7 +15,7 @@ The second route is a sampled, ideal circuit-simulation workflow. It is not a ha
 vqd_nuclear/
   src/vqd_nuclear/
     config.py          # dataclass-based configuration
-    hamiltonian.py     # qUBshell Hamiltonian loading and exact diagonalization
+    hamiltonian.py     # PyNucShell Hamiltonian loading and exact diagonalization
     ansatz.py          # reference determinant selection and ADAPT ansatz construction
     measurements.py    # statevector, paper-style shot measurements, QWC fallback, and destructive-SWAP estimators
     parallel.py        # safe worker helpers
@@ -129,12 +129,17 @@ Convergence no longer stops merely because the most recently added theta is belo
 
 ## VQD beta rule
 
-For excited-state calculations with `--n-states >= 2`, the code sets the VQD deflation penalty automatically as
+Each selected execution route runs two independent VQD families, with a penalty calculated separately for each target state `i` (ground state is `i = 0`):
 
 ```text
-beta = 2 * max_i abs(E_i - E_0)
+beta_exact_i = 2 * abs(E_i - E_0)
+beta_approximate_i = abs(e_i - e_0 + 2 * B)
 ```
-For a single-state run, beta is not used.
+`E_i` are exact eigenenergies. `e_i` are the diagonal entries of the many-body Hamiltonian sorted in ascending order, retaining repeated values. `B = max_r sum_(c != r) abs(H_rc)` is the largest absolute off-diagonal row sum. Thus the first excited state uses `e_1`, and the second uses `e_2`. The approximate penalty is computed directly from the matrix without using eigenenergies.
+
+Beta is calculated automatically using these two methods. Ground-state calculations use no penalty. Each family starts with its own ground state and deflates only against its own previous states. Both families use the same seed and numerical settings.
+
+TXT, CSV, and JSON results identify the variant as `beta_method` (`exact` or `approximate`) and record the beta used for each state. Energy sorting and validation are performed separately for each variant. With both execution routes enabled, four families are computed. For `n_states = N`, each route's result list contains `N` exact-beta results followed by `N` approximate-beta results.
 
 ## Outputs
 

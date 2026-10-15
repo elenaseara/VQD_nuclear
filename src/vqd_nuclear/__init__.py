@@ -2,10 +2,9 @@
 
 from .config import FullQuantumLimits, NumericalConfig, OutputConfig, ProblemConfig, RunConfig
 from .validation import (
-    beta_from_first_excitation_gap,
-    beta_from_largest_requested_gap,
-    resolve_beta,
-    validate_beta,
+    approximate_betas,
+    exact_betas,
+    resolve_beta_comparison,
 )
 
 
@@ -23,8 +22,7 @@ __all__ = [
     "FullQuantumLimits",
     "OutputConfig",
     "run_workflow",
-    "beta_from_first_excitation_gap",
-    "beta_from_largest_requested_gap",
-    "resolve_beta",
-    "validate_beta",
+    "approximate_betas",
+    "resolve_beta_comparison",
+    "exact_betas",
 ]

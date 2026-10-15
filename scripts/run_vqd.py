@@ -35,15 +35,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--total-j", "--J", dest="total_j", type=int, default=0)
     parser.add_argument("--n-states", type=int, default=2)
     parser.add_argument(
-        "--beta",
-        type=float,
-        default=None,
-        help=(
-            "Deprecated/optional. For n-states >= 2 the workflow ignores this value "
-            "and sets beta automatically to 2*max_i abs(E_i - E_0) from exact diagonalization."
-        ),
-    )
-    parser.add_argument(
         "--mode",
         choices=["statevector_exact", "full_quantum_circuit", "both"],
         default=None,
@@ -147,7 +138,6 @@ def main() -> int:
     )
     run = RunConfig(
         n_states=args.n_states,
-        beta=0.0 if args.beta is None else args.beta,
         run_statevector=run_statevector,
         run_full_quantum_circuit=run_full_quantum_circuit,
         n_workers=args.n_workers,

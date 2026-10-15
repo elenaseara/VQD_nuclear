@@ -1,5 +1,6 @@
 from pathlib import Path
 import importlib.util
+import pytest
 
 
 def load_run_vqd_module():
@@ -59,3 +60,10 @@ def test_cli_measurement_strategy_qwc_is_accepted():
     cli = load_run_vqd_module()
     args = cli.build_parser().parse_args(["--measurement-strategy", "qwc"])
     assert args.measurement_strategy == "qwc"
+
+
+def test_cli_rejects_manual_beta():
+    cli = load_run_vqd_module()
+    with pytest.raises(SystemExit) as exc:
+        cli.build_parser().parse_args(["--beta", "3.0"])
+    assert exc.value.code == 2

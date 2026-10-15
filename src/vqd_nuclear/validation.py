@@ -3,108 +3,74 @@ from __future__ import annotations
 
 from typing import Any
 import numpy as np
+from scipy.sparse import issparse
 
 
-def beta_from_largest_requested_gap(exact_energies: np.ndarray, n_states: int) -> float:
-    """Return a VQD penalty large enough for all requested states.
+def approximate_betas(matrix: Any, n_states: int) -> dict[str, Any]:
+    """Compute beta_i = |e_i - e_0 + 2B| in the many-body basis.
 
-    The deflation penalty must be larger than the energy separation between
-    the ground state and any lower state that could otherwise be selected again.
-    For multi-state VQD runs this uses
-
-        beta = 2 * max_i |E_i - E_0|,
-
-    where the maximum is taken over the exact energies of the requested states.
-    This avoids the failure mode in which a higher excited-state calculation
-    collapses back to the ground state because beta = 2*|E1 - E0| is too small.
+    Diagonal entries are sorted with multiplicities. B is the largest absolute
+    off-diagonal row sum; sparse Hamiltonians never need to be densified.
+    The ground-state run has no deflation penalty and uses beta_0 = 0.
     """
-    exact_energies = np.asarray(exact_energies, dtype=float)
-    n_requested = int(n_states)
-
-    if n_requested < 2:
-        return 0.0
-
-    if len(exact_energies) < n_requested:
-        raise ValueError(
-            f"At least {n_requested} exact energies are required to set beta "
-            "from the largest requested excitation gap."
-        )
-
-    ground_energy = float(exact_energies[0])
-    requested_energies = exact_energies[:n_requested]
-    gaps = np.abs(requested_energies - ground_energy)
-    max_gap = float(np.max(gaps))
-
-    if not np.isfinite(max_gap):
-        raise ValueError("The requested excitation gaps are not finite, so beta cannot be determined.")
-
-    return float(2.0 * max_gap)
-
-
-def beta_from_first_excitation_gap(exact_energies: np.ndarray, n_states: int) -> float:
-    """Return the legacy two-state penalty beta = 2*|E1 - E0|.
-
-    This public helper is kept for backward compatibility and for tests that
-    explicitly validate the original two-state rule. The workflow itself uses
-    :func:`beta_from_largest_requested_gap` through :func:`resolve_beta`.
-    """
-    exact_energies = np.asarray(exact_energies, dtype=float)
-
-    if int(n_states) < 2:
-        return 0.0
-
-    if len(exact_energies) < 2:
-        raise ValueError("At least two exact energies are required to set beta = 2*max_i abs(E_i - E_0).")
-
-    gap = abs(float(exact_energies[1]) - float(exact_energies[0]))
-
-    if not np.isfinite(gap):
-        raise ValueError("The exact first excitation gap is not finite, so beta cannot be determined.")
-
-    return float(2.0 * gap)
-
-
-def resolve_beta(requested_beta: float | None, exact_energies: np.ndarray, n_states: int) -> dict[str, Any]:
-    """Resolve the beta used by the workflow.
-
-    For n_states >= 2 the code intentionally ignores the user-provided beta and
-    sets beta from the largest exact excitation gap among the requested states.
-    The originally requested value is still returned for provenance in output
-    reports.
-    """
-    exact_energies = np.asarray(exact_energies, dtype=float)
-    n_requested = int(n_states)
-
-    if n_requested < 2:
-        return {
-            "beta": 0.0,
-            "requested_beta": None if requested_beta is None else float(requested_beta),
-            "status": "not_needed",
-            "gap_01": None,
-            "max_requested_gap": None,
-            "formula": "beta is not used for a single-state VQE/VQD run",
-            "message": "beta is not used because only one state was requested.",
-        }
-
-    beta = beta_from_largest_requested_gap(exact_energies, n_requested)
-    gap_01 = abs(float(exact_energies[1]) - float(exact_energies[0]))
-    max_requested_gap = float(np.max(np.abs(exact_energies[:n_requested] - float(exact_energies[0]))))
-    requested = None if requested_beta is None else float(requested_beta)
-
+    if len(matrix.shape) != 2 or matrix.shape[0] != matrix.shape[1]:
+        raise ValueError("The Hamiltonian matrix must be square.")
+    if not 1 <= int(n_states) <= matrix.shape[0]:
+        raise ValueError("n_states must be between 1 and the Hamiltonian dimension.")
+    if issparse(matrix):
+        off_diagonal = matrix.tocsr(copy=True)
+        off_diagonal.sum_duplicates()
+        diagonal = np.asarray(off_diagonal.diagonal())
+        off_diagonal.setdiag(0)
+        off_diagonal.eliminate_zeros()
+        row_sums = np.asarray(abs(off_diagonal).sum(axis=1)).ravel()
+    else:
+        off_diagonal = np.array(matrix, copy=True)
+        diagonal = np.diag(off_diagonal).copy()
+        np.fill_diagonal(off_diagonal, 0)
+        row_sums = np.sum(np.abs(off_diagonal), axis=1)
+    if not np.all(np.isfinite(diagonal)) or not np.all(np.isfinite(row_sums)):
+        raise ValueError("Hamiltonian entries must be finite to determine beta.")
+    if np.any(np.imag(diagonal) != 0):
+        raise ValueError("The Hamiltonian diagonal must contain real energies.")
+    energies = np.sort(np.real(diagonal).astype(float))
+    bound = float(np.max(row_sums))
+    betas = np.abs(energies[:int(n_states)] - energies[0] + 2.0 * bound)
+    betas[0] = 0.0
+    if not np.all(np.isfinite(betas)):
+        raise ValueError("The approximate penalties are not finite.")
     return {
-        "beta": beta,
-        "requested_beta": requested,
-        "status": "auto_from_largest_requested_gap",
-        "gap_01": gap_01,
-        "max_requested_gap": max_requested_gap,
-        "formula": "beta = 2*max_i(abs(E_i - E_0)) for requested states",
-        "message": (
-            f"beta was set to 2*max_i(|Ei - E0|) = {beta:.12g} "
-            f"using the largest requested gap {max_requested_gap:.12g}."
-        ),
+        "betas": betas.tolist(),
+        "diagonal_energies": energies[:int(n_states)].tolist(),
+        "B": bound,
+        "formula": "beta_i = abs(e_i - e_0 + 2*B); beta_0 = 0 (unused)",
     }
 
 
-def validate_beta(beta: float | None, exact_energies: np.ndarray, n_states: int) -> dict[str, Any]:
-    """Backward-compatible alias for beta resolution."""
-    return resolve_beta(beta, exact_energies, n_states)
+def exact_betas(exact_energies: np.ndarray, n_states: int) -> dict[str, Any]:
+    """Compute beta_i = 2*|E_i-E_0| from exact diagonalization energies."""
+    if int(n_states) < 1:
+        raise ValueError("At least one state must be requested.")
+    exact_energies = np.asarray(exact_energies, dtype=float)
+    if len(exact_energies) < int(n_states) or not np.all(np.isfinite(exact_energies[:int(n_states)])):
+        raise ValueError("Finite exact energies are required for all requested states.")
+    betas = 2.0 * np.abs(exact_energies[:int(n_states)] - exact_energies[0])
+    if not np.all(np.isfinite(betas)):
+        raise ValueError("The exact penalties are not finite.")
+    return {"betas": betas.tolist(), "formula": "beta_i = 2*abs(E_i - E_0)"}
+
+
+def resolve_beta_comparison(exact_energies: np.ndarray, matrix: Any, n_states: int) -> dict[str, Any]:
+    """Calculate the exact and approximate per-target penalties."""
+    exact = exact_betas(exact_energies, n_states)
+    approximate = approximate_betas(matrix, n_states)
+    return {
+        "status": "automatic_comparison",
+        "exact": exact,
+        "approximate": approximate,
+        "message": (
+            f"Exact beta by state: {exact['betas']}; "
+            f"approximate beta by state: {approximate['betas']} (B={approximate['B']:.12g}). "
+            "Ground-state beta is unused."
+        ),
+    }

@@ -16,7 +16,7 @@ from .config import FullQuantumLimits, NumericalConfig, ProblemConfig, RunConfig
 from .hamiltonian import HamiltonianData, build_hamiltonian_data
 from .measurements import MeasurementEngine
 from .parallel import parallel_map, resolve_n_jobs
-from .validation import resolve_beta
+from .validation import resolve_beta_comparison
 
 LOGGER = logging.getLogger(__name__)
 
@@ -366,7 +366,8 @@ def run_adapt_vqd(context: VQDContext, *, previous_ansatze: list[dict[str, Any]]
     }
 
 
-def run_vqd_family(context: VQDContext, *, cost_mode: str, options: dict[str, Any]) -> list[dict[str, Any]]:
+def run_vqd_family(context: VQDContext, *, cost_mode: str, options: dict[str, Any],
+                   beta_method: str, state_betas: list[float]) -> list[dict[str, Any]]:
     """Run all requested VQD states for one objective-evaluation route."""
     context.measurements.clear_cache()
     results: list[dict[str, Any]] = []
@@ -374,10 +375,11 @@ def run_vqd_family(context: VQDContext, *, cost_mode: str, options: dict[str, An
         result = run_adapt_vqd(
             context,
             previous_ansatze=results,
-            betas=[float(context.run.beta)] * state_index,
+            betas=[float(state_betas[state_index])] * state_index,
             cost_mode=cost_mode,
             **options,
         )
+        result["beta_method"] = beta_method
         results.append(result)
     return results
 
@@ -385,8 +387,9 @@ def run_vqd_family(context: VQDContext, *, cost_mode: str, options: dict[str, An
 def run_workflow(problem: ProblemConfig, run: RunConfig, numerical: NumericalConfig, full_limits: FullQuantumLimits, *, qibo_backend: str = "numpy") -> dict[str, Any]:
     """Execute the complete VQD workflow and return all numerical results."""
     context = build_context(problem, run, numerical, qibo_backend=qibo_backend)
-    beta_check = resolve_beta(run.beta, context.hamiltonian.exact_energies, run.n_states)
-    run.beta = float(beta_check["beta"])
+    beta_check = resolve_beta_comparison(
+        context.hamiltonian.exact_energies, context.hamiltonian.matrix, run.n_states,
+    )
 
     statevector_results: list[dict[str, Any]] = []
     full_quantum_circuit_results: list[dict[str, Any]] = []
@@ -394,11 +397,21 @@ def run_workflow(problem: ProblemConfig, run: RunConfig, numerical: NumericalCon
     # measurement_strategy configures MeasurementEngine and is not an ADAPT optimizer option.
     numerical_options.pop("measurement_strategy", None)
 
-    if run.run_statevector:
-        statevector_results = run_vqd_family(context, cost_mode="statevector_exact", options=dict(numerical_options))
-    if run.run_full_quantum_circuit:
-        full_options = apply_optional_caps(dict(numerical_options), dataclass_to_dict(full_limits))
-        full_quantum_circuit_results = run_vqd_family(context, cost_mode="full_quantum_circuit", options=full_options)
+    for beta_method in ("exact", "approximate"):
+        state_betas = beta_check[beta_method]["betas"]
+        if run.run_statevector:
+            set_reproducible_seed(run.seed)
+            statevector_results.extend(run_vqd_family(
+                context, cost_mode="statevector_exact", options=dict(numerical_options),
+                beta_method=beta_method, state_betas=state_betas,
+            ))
+        if run.run_full_quantum_circuit:
+            set_reproducible_seed(run.seed)
+            full_options = apply_optional_caps(dict(numerical_options), dataclass_to_dict(full_limits))
+            full_quantum_circuit_results.extend(run_vqd_family(
+                context, cost_mode="full_quantum_circuit", options=full_options,
+                beta_method=beta_method, state_betas=state_betas,
+            ))
 
     return {
         "context": context,

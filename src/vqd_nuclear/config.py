@@ -22,11 +22,10 @@ class RunConfig:
     """High-level VQD execution settings."""
 
     n_states: int = 2
-    beta: float = 3.0
     run_statevector: bool = True
     run_full_quantum_circuit: bool = True
     n_workers: int | str = "auto"
-    seed: int = 12345
+    seed: int = 47433
 
 
 @dataclass(slots=True)
