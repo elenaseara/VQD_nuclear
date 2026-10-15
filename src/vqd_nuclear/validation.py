@@ -64,43 +64,81 @@ def beta_from_first_excitation_gap(exact_energies: np.ndarray, n_states: int) ->
     return float(2.0 * gap)
 
 
-def resolve_beta(requested_beta: float | None, exact_energies: np.ndarray, n_states: int) -> dict[str, Any]:
+def resolve_beta(requested_beta, exact_energies, n_states) -> dict[str, Any]:
     """Resolve the beta used by the workflow.
 
-    For n_states >= 2 the code intentionally ignores the user-provided beta and
-    sets beta from the largest exact excitation gap among the requested states.
-    The originally requested value is still returned for provenance in output
-    reports.
+    ``requested_beta`` may be ``None`` or ``"auto"`` to derive beta from the
+    exact spectrum, or an explicit non-negative number, which is respected.
+    An explicit value below the largest requested gap is flagged as unsafe but
+    is NOT overridden: the caller asked for it deliberately.
     """
     exact_energies = np.asarray(exact_energies, dtype=float)
     n_requested = int(n_states)
 
+    is_auto = requested_beta is None or (
+        isinstance(requested_beta, str) and requested_beta.strip().lower() == "auto"
+    )
+    requested = None if is_auto else float(requested_beta)
+
+    if requested is not None and (requested < 0.0 or not np.isfinite(requested)):
+        raise ValueError(f"beta must be a finite non-negative number, got {requested_beta!r}.")
+
     if n_requested < 2:
         return {
             "beta": 0.0,
-            "requested_beta": None if requested_beta is None else float(requested_beta),
+            "requested_beta": "auto" if is_auto else requested,
             "status": "not_needed",
             "gap_01": None,
             "max_requested_gap": None,
+            "auto_beta": None,
+            "warning": None,
             "formula": "beta is not used for a single-state VQE/VQD run",
             "message": "beta is not used because only one state was requested.",
         }
 
-    beta = beta_from_largest_requested_gap(exact_energies, n_requested)
+    auto_beta = beta_from_largest_requested_gap(exact_energies, n_requested)
     gap_01 = abs(float(exact_energies[1]) - float(exact_energies[0]))
-    max_requested_gap = float(np.max(np.abs(exact_energies[:n_requested] - float(exact_energies[0]))))
-    requested = None if requested_beta is None else float(requested_beta)
+    max_requested_gap = float(
+        np.max(np.abs(exact_energies[:n_requested] - float(exact_energies[0])))
+    )
+
+    if is_auto:
+        return {
+            "beta": auto_beta,
+            "requested_beta": "auto",
+            "status": "auto_from_largest_requested_gap",
+            "gap_01": gap_01,
+            "max_requested_gap": max_requested_gap,
+            "auto_beta": auto_beta,
+            "warning": None,
+            "formula": "beta = 2*max_i(abs(E_i - E_0)) for requested states",
+            "message": (
+                f"beta was set automatically to 2*max_i(|Ei - E0|) = {auto_beta:.12g} "
+                f"using the largest requested gap {max_requested_gap:.12g}."
+            ),
+        }
+
+    warning = None
+    if requested < max_requested_gap:
+        warning = (
+            f"beta = {requested:.12g} is below the largest requested gap "
+            f"{max_requested_gap:.12g}. VQD requires beta_i > E_k - E_i, so an excited "
+            "state may collapse onto a lower one. Check the final overlaps."
+        )
 
     return {
-        "beta": beta,
+        "beta": requested,
         "requested_beta": requested,
-        "status": "auto_from_largest_requested_gap",
+        "status": "user_supplied",
         "gap_01": gap_01,
         "max_requested_gap": max_requested_gap,
-        "formula": "beta = 2*max_i(abs(E_i - E_0)) for requested states",
+        "auto_beta": auto_beta,
+        "warning": warning,
+        "formula": "beta supplied explicitly by the user",
         "message": (
-            f"beta was set to 2*max_i(|Ei - E0|) = {beta:.12g} "
-            f"using the largest requested gap {max_requested_gap:.12g}."
+            f"beta = {requested:.12g} was supplied explicitly "
+            f"(the automatic value would have been {auto_beta:.12g})."
+            + (f" WARNING: {warning}" if warning else "")
         ),
     }
 

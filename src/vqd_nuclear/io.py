@@ -41,6 +41,8 @@ def serializable_result(result: dict[str, Any]) -> dict[str, Any]:
             clean[key] = int(value)
         elif isinstance(value, (np.floating,)):
             clean[key] = float(value)
+        elif isinstance(value, float) and not np.isfinite(value):
+            clean[key] = None
         else:
             clean[key] = value
     return clean
@@ -70,6 +72,7 @@ def build_summary_dataframe(results: list[dict[str, Any]], label: str, run_id: s
             "grad_tol": float(result.get("grad_tol", np.nan)),
             "operators": as_clean_string(result.get("ops", []), precision=0),
             "thetas": as_clean_string(result.get("thetas", []), precision=12),
+            "selection_criterion": result.get("selection_criterion", ""),
         })
     return pd.DataFrame(rows)
 
@@ -283,8 +286,8 @@ def write_single_readable_txt_report(path: Path, *, run_id: str, context: "VQDCo
         f"Reference diagonal energy: {context.reference.diagonal_energy:.12f}",
         f"First active operator: {context.reference.first_active_operator}",
         f"Beta check: {beta_check.get('message', '')}",
-        f"Measurement strategy: {context.measurements.measurement_strategy}",
-        f"Measurement circuits: {context.measurements.measurement_summary}",
+        f"Measurement strategy: {getattr(context.measurements, 'measurement_strategy', 'n/a')}",
+        f"Measurement circuits: {getattr(context.measurements, 'measurement_summary', 'n/a (planes diferidos)')}",
     ]
     add_section("VQD RUN METADATA", "\n".join(metadata_lines))
     add_section("PROBLEM CONFIGURATION", "\n".join(f"{k}: {v}" for k, v in dataclass_to_dict(problem).items()))
@@ -375,6 +378,19 @@ def save_outputs(output: OutputConfig, *, run_id: str, problem: ProblemConfig, r
             "full_quantum_circuit_results": [serializable_result(r) for r in full_quantum_circuit_results],
         }
         json_path.write_text(json.dumps(raw, indent=2), encoding="utf-8")
+
+        diagnostics_rows = []
+        for label, group in (("statevector", statevector_results),
+                             ("full_quantum_circuit", full_quantum_circuit_results)):
+            for result in group:
+                for row in result.get("gradient_diagnostics", []):
+                    diagnostics_rows.append({"run_id": run_id, "method": label, **row})
+        diagnostics_df = pd.DataFrame(diagnostics_rows)
+        if not diagnostics_df.empty:
+            diagnostics_path = results_dir / f"gradient_diagnostics_{run_id}.csv"
+            diagnostics_df.to_csv(diagnostics_path, index=False)
+            paths["gradient_diagnostics_csv"] = diagnostics_path
+
         paths.update({
             "summary_csv": summary_path,
             "history_csv": history_path,

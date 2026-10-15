@@ -58,7 +58,7 @@ def exact_lowest_energies(nucleus: Any, n_states: int) -> tuple[np.ndarray, np.n
     so that validation and beta selection still receive meaningful exact
     energies.
     """
-    matrix = pns.Simulator(nucleus._ham, nucleus._basis).to_csr()
+    matrix = nucleus.to_csr()
     dim = int(matrix.shape[0])
     requested = max(1, int(n_states))
 

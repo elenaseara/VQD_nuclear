@@ -22,9 +22,9 @@ class RunConfig:
     """High-level VQD execution settings."""
 
     n_states: int = 2
-    beta: float = 3.0
+    beta: float | str = "auto"
     run_statevector: bool = True
-    run_full_quantum_circuit: bool = True
+    run_full_quantum_circuit: bool = False
     n_workers: int | str = "auto"
     seed: int = 12345
 
@@ -44,6 +44,8 @@ class NumericalConfig:
     gradient_method: str = "analytic"
     measurement_strategy: str = "paper"
     n_jobs: int | str = "all"
+    selection_criterion: str = "full_vqd"
+    collect_gradient_diagnostics: bool = False
 
 
 @dataclass(slots=True)
@@ -102,8 +104,9 @@ def apply_optional_caps(options: dict[str, Any], caps: dict[str, Any]) -> dict[s
     for key, cap_value in caps.items():
         if cap_value is None:
             continue
-        if key in capped and capped[key] is not None and isinstance(cap_value, int):
-            capped[key] = min(capped[key], cap_value)
-        else:
+        current = capped.get(key)
+        if isinstance(cap_value, int) and isinstance(current, int):
+            capped[key] = min(current, cap_value)
+        elif key not in capped:
             capped[key] = cap_value
     return capped
