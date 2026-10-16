@@ -218,7 +218,10 @@ def select_next_operator(context: VQDContext, thetas: list[float], operator_indi
     raise ValueError("gradient_method must be 'analytic' or 'finite_difference'.")
 
 
-def optimize_ansatz(context: VQDContext, thetas: list[float], operator_indices: list[int], previous_ansatze: list[dict[str, Any]], betas: list[float], *, overlap_shots: int, energy_shots: int, optimizer_maxiter: int, n_jobs: int | str | None, cost_mode: str):
+def optimize_ansatz(context: VQDContext, thetas: list[float], operator_indices: list[int],
+                    previous_ansatze: list[dict[str, Any]], betas: list[float], *, overlap_shots: int,
+                    energy_shots: int, optimizer_maxiter: int, cobyla_rhobeg=0.03, cobyla_rhoend=5e-3,
+                    n_jobs: int | str | None, cost_mode: str):
     """Optimize the current ADAPT-VQD ansatz using COBYLA."""
     def objective(x: np.ndarray) -> float:
         return vqd_cost(
@@ -233,11 +236,20 @@ def optimize_ansatz(context: VQDContext, thetas: list[float], operator_indices: 
             cost_mode=cost_mode,
         )
 
+    if not float(cobyla_rhobeg) > float(cobyla_rhoend) > 0.0:
+        raise ValueError(
+            f"COBYLA exige rhobeg > rhoend > 0; recibidos: "
+            f"rhobeg={cobyla_rhobeg}, rhoend={cobyla_rhoend}."
+        )
+
+
     result = minimize(
         objective,
         np.asarray(thetas, dtype=float),
         method="COBYLA",
-        options={"maxiter": int(optimizer_maxiter), "rhobeg": 0.03, "tol": 5e-3},
+        options={"maxiter": int(optimizer_maxiter), 
+                 "rhobeg": float(cobyla_rhobeg), 
+                 "tol": float(cobyla_rhoend)},
     )
     return list(result.x), float(result.fun), result
 
@@ -260,9 +272,10 @@ def evaluate_energy(context: VQDContext, thetas: list[float], operator_indices: 
 
 def run_adapt_vqd(context: VQDContext, *, previous_ansatze: list[dict[str, Any]] | None = None, betas: list[float] | None = None,
                   max_adapt_iter: int = 20, grad_tol: float = 2e-4, max_candidates: int | None = None, n_jobs: int | str | None = None,
-                  overlap_shots: int = 200000, energy_shots: int = 200000, optimizer_maxiter: int = 200, new_theta_tol: float = 1e-3,
-                  energy_improvement_tol: float = 1e-4, cost_mode: str = "statevector_exact", gradient_method: str = "analytic",
-                  selection_criterion: str = "full_vqd", collect_gradient_diagnostics: bool = False, store_history: bool = True
+                  overlap_shots: int = 200000, energy_shots: int = 200000, optimizer_maxiter: int = 200, cobyla_rhobeg: float=0.03,
+                  cobyla_rhoend: float = 5e-3, new_theta_tol: float = 1e-3, energy_improvement_tol: float = 1e-4,
+                  cost_mode: str = "statevector_exact", gradient_method: str = "analytic", selection_criterion: str = "full_vqd",
+                  collect_gradient_diagnostics: bool = False, store_history: bool = True
                   ) -> dict[str, Any]:
     """Run ADAPT-VQD for one state."""
     previous_ansatze = previous_ansatze or []
@@ -314,6 +327,8 @@ def run_adapt_vqd(context: VQDContext, *, previous_ansatze: list[dict[str, Any]]
             overlap_shots=overlap_shots,
             energy_shots=energy_shots,
             optimizer_maxiter=optimizer_maxiter,
+            cobyla_rhobeg=cobyla_rhobeg,
+            cobyla_rhoend=cobyla_rhoend,
             n_jobs=workers,
             cost_mode=cost_mode,
         )
@@ -397,6 +412,8 @@ def run_adapt_vqd(context: VQDContext, *, previous_ansatze: list[dict[str, Any]]
         "overlap_shots": int(overlap_shots),
         "energy_shots": int(energy_shots),
         "optimizer_maxiter": int(optimizer_maxiter),
+        "cobyla_rhobeg": float(cobyla_rhobeg),
+        "cobyla_rhoend": float(cobyla_rhoend),
         "max_adapt_iter": int(max_adapt_iter),
         "max_candidates": None if max_candidates is None else int(max_candidates),
         "grad_tol": float(grad_tol),

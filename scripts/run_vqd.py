@@ -70,6 +70,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--grad-tol", type=float, default=5e-4)
     parser.add_argument("--max-candidates", type=int, default=None)
     parser.add_argument("--optimizer-maxiter", type=int, default=1500)
+    parser.add_argument("--cobyla-rhobeg", type=float, default=0.03,
+                        help="Radio inicial del simplex de COBYLA.")
+    parser.add_argument("--cobyla-rhoend", type=float, default=5e-3,
+                        help="Radio final de COBYLA (el 'tol' de SciPy).")
     parser.add_argument("--overlap-shots", type=int, default=200000)
     parser.add_argument("--energy-shots", type=int, default=200000)
     parser.add_argument("--new-theta-tol", type=float, default=1e-3)
@@ -159,6 +163,8 @@ def main() -> int:
         grad_tol=args.grad_tol,
         max_candidates=args.max_candidates,
         optimizer_maxiter=args.optimizer_maxiter,
+        cobyla_rhobeg=args.cobyla_rhobeg,
+        cobyla_rhoend=args.cobyla_rhoend,
         overlap_shots=args.overlap_shots,
         energy_shots=args.energy_shots,
         new_theta_tol=args.new_theta_tol,
