@@ -38,3 +38,14 @@ nohup.out
 
 # Notebooks checkpoints
 .ipynb_checkpoints/
+
+# Pruebas varias
+
+./check_env.py
+./check_jw_block.py
+./diagnose_pns.py
+./probe_matrix.py
+./profile_vqd.py
+./provenance.json
+./src/vqd_nuclear/measurements_legacy.py
+./verify_statevector.py
