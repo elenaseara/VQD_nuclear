@@ -2,6 +2,8 @@
 
 This repository computes low-lying shell-model nuclear states using an ADAPT-VQD workflow implemented with PyNucShell Hamiltonians and Qibo circuit simulation.
 
+The many-body determinants, Hamiltonian and excitation pool share an explicit orbital mapping derived from the PyNucShell single-particle space. All orbitals of each populated species are retained. Neutron-only calculations use a compact register (6 qubits in the p shell, 12 in sd); mixed systems retain both species. Fermionic operators are relabeled before Jordan-Wigner encoding so parity strings follow the same convention as reference circuits. Reference selection checks every determinant energy against the shell-model matrix diagonal. TXT and JSON reports record the orbital mapping.
+
 The code supports two objective-evaluation routes:
 
 1. `statevector_exact`: the ansatz circuit is simulated as a dense statevector, and energies and overlaps are evaluated exactly from the simulator statevector.
@@ -16,6 +18,7 @@ vqd_nuclear/
   src/vqd_nuclear/
     config.py          # dataclass-based configuration
     hamiltonian.py     # PyNucShell Hamiltonian loading and exact diagonalization
+    orbitals.py        # shared physical-orbital to JW qubit mapping
     ansatz.py          # reference determinant selection and ADAPT ansatz construction
     measurements.py    # statevector, paper-style shot measurements, QWC fallback, and destructive-SWAP estimators
     parallel.py        # safe worker helpers

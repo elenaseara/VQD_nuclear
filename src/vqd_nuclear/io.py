@@ -289,6 +289,7 @@ def write_single_readable_txt_report(path: Path, *, run_id: str, context: "VQDCo
         f"Generated at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         f"Detected CPU workers: {context.available_workers}",
         f"n_qubits: {context.hamiltonian.n_qubits}",
+        f"Global orbitals -> JW qubits: {context.hamiltonian.orbital_mapping.global_to_qubit}",
         f"Reference occupied orbitals: {context.reference.occupied_orbitals}",
         f"Reference diagonal energy: {context.reference.diagonal_energy:.12f}",
         f"First active operator: {context.reference.first_active_operator}",
@@ -381,6 +382,10 @@ def save_outputs(output: OutputConfig, *, run_id: str, problem: ProblemConfig, r
             "numerical": dataclass_to_dict(numerical),
             "full_limits": dataclass_to_dict(full_limits),
             "beta_check": workflow_output["beta_check"],
+            "orbital_mapping": {
+                "global_to_qubit": context.hamiltonian.orbital_mapping.global_to_qubit,
+                "qubit_species": list(context.hamiltonian.orbital_mapping.qubit_species),
+            },
             "statevector_results": [serializable_result(r) for r in statevector_results],
             "full_quantum_circuit_results": [serializable_result(r) for r in full_quantum_circuit_results],
         }

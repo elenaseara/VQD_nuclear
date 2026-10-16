@@ -16,8 +16,8 @@ Set-StrictMode -Version Latest
 # CONFIGURACION DEL CALCULO LOCAL
 # ============================================================================
 $Shell = "p"
-$Protons = 1
-$Neutrons = 1
+$Protons = 0
+$Neutrons = 2
 $TotalJ = 0
 # 1 = fundamental; 2 incluye primer excitado; 3 incluye segundo excitado.
 $NStates = 2

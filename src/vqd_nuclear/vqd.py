@@ -64,6 +64,8 @@ def build_context(problem: ProblemConfig, run: RunConfig, numerical: NumericalCo
         qubit_hamiltonian=hamiltonian.qubit_hamiltonian,
         qubit_generator_pool=hamiltonian.qubit_generator_pool,
         backend=hamiltonian.backend,
+        orbital_mapping=hamiltonian.orbital_mapping,
+        shell_diagonal=hamiltonian.matrix.diagonal(),
     )
     prepared_pool = prepare_generator_term_pool(hamiltonian.qubit_generator_pool)
     ansatz_builder = AnsatzBuilder(

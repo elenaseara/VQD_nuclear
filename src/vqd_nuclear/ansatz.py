@@ -13,6 +13,7 @@ from qibo.models import Circuit
 from pynucshell.operators import QubitOperator
 
 from .config import ProblemConfig
+from .orbitals import OrbitalMapping
 
 
 @dataclass(slots=True)
@@ -59,23 +60,25 @@ def basis_state_to_occupied_orbitals(state: Any, *, n_qubits: int, n_valence_par
     raise ValueError(f"Could not extract occupied orbitals from basis state: {state}")
 
 
-def get_hamiltonian_basis_references(nucleus: Any, *, n_qubits: int, n_valence_particles: int) -> list[tuple[int, ...]]:
+def get_hamiltonian_basis_references(nucleus: Any, *, n_qubits: int, n_valence_particles: int,
+                                     orbital_mapping: OrbitalMapping) -> list[tuple[int, ...]]:
     """Extract all Slater determinants from the Hamiltonian many-body basis."""
+    if n_qubits != orbital_mapping.n_qubits:
+        raise ValueError("The qubit register does not match the physical orbital mapping.")
     mbasis = nucleus.get_basis().mb()
     entries = mbasis.values() if isinstance(mbasis, dict) else mbasis
     references: list[tuple[int, ...]] = []
     for state in entries:
-        occupied = tuple(sorted(set(basis_state_to_occupied_orbitals(
+        occupied = orbital_mapping.determinant(basis_state_to_occupied_orbitals(
             state,
-            n_qubits=n_qubits,
+            n_qubits=len(nucleus.get_space().isospin),
             n_valence_particles=n_valence_particles,
-        ))))
+        ))
         if len(occupied) != n_valence_particles:
             raise ValueError(f"Basis state {state} gives {len(occupied)} particles, expected {n_valence_particles}.")
         if not all(0 <= q < n_qubits for q in occupied):
             raise ValueError(f"Basis state {state} contains orbitals outside [0,{n_qubits - 1}].")
         references.append(occupied)
-    references = sorted(set(references))
     if not references:
         raise RuntimeError("No Slater determinants found in nucleus.get_basis().mb().")
     return references
@@ -189,11 +192,17 @@ def find_first_active_operator(occupied_orbitals: tuple[int, ...], *, n_qubits: 
     return None, 0.0
 
 
-def find_reference_from_hamiltonian_basis(problem: ProblemConfig, nucleus: Any, *, n_qubits: int, qubit_hamiltonian: Any, qubit_generator_pool: list[Any], backend: Any) -> ReferenceData:
+def find_reference_from_hamiltonian_basis(problem: ProblemConfig, nucleus: Any, *, n_qubits: int, qubit_hamiltonian: Any, qubit_generator_pool: list[Any], backend: Any,
+                                         orbital_mapping: OrbitalMapping, shell_diagonal: np.ndarray) -> ReferenceData:
     """Choose the lowest-energy Slater determinant activated by the ADAPT pool."""
     n_valence_particles = int(problem.n_valence_protons + problem.n_valence_neutrons)
-    references = get_hamiltonian_basis_references(nucleus, n_qubits=n_qubits, n_valence_particles=n_valence_particles)
-    ranked = sorted((diagonal_energy(occ, qubit_hamiltonian), occ) for occ in references)
+    references = get_hamiltonian_basis_references(
+        nucleus, n_qubits=n_qubits, n_valence_particles=n_valence_particles, orbital_mapping=orbital_mapping,
+    )
+    energies = [diagonal_energy(occ, qubit_hamiltonian) for occ in references]
+    if np.shape(shell_diagonal) != (len(energies),) or not np.allclose(energies, shell_diagonal, rtol=1e-9, atol=1e-9):
+        raise ValueError("Mapped JW determinant energies disagree with the shell-model Hamiltonian diagonal.")
+    ranked = sorted(zip(energies, references))
     for energy, occupied_orbitals in ranked:
         operator_index, diff = find_first_active_operator(
             occupied_orbitals,
