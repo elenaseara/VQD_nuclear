@@ -1,5 +1,6 @@
 """Reference-state selection and ADAPT ansatz construction."""
 from __future__ import annotations
+import logging
 
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -14,6 +15,7 @@ from pynucshell.operators import QubitOperator
 
 from .config import ProblemConfig
 
+LOGGER = logging.getLogger(__name__)
 
 @dataclass(slots=True)
 class ReferenceData:
@@ -63,7 +65,8 @@ def get_hamiltonian_basis_references(nucleus: Any, *, n_qubits: int, n_valence_p
     """Extract all Slater determinants from the Hamiltonian many-body basis."""
     mbasis = nucleus.get_basis().mb()
     entries = mbasis.values() if isinstance(mbasis, dict) else mbasis
-    references: list[tuple[int, ...]] = []
+
+    tmp: list[tuple[int, ...]] = []
     for state in entries:
         occupied = tuple(sorted(set(basis_state_to_occupied_orbitals(
             state,
@@ -72,13 +75,32 @@ def get_hamiltonian_basis_references(nucleus: Any, *, n_qubits: int, n_valence_p
         ))))
         if len(occupied) != n_valence_particles:
             raise ValueError(f"Basis state {state} gives {len(occupied)} particles, expected {n_valence_particles}.")
-        if not all(0 <= q < n_qubits for q in occupied):
-            raise ValueError(f"Basis state {state} contains orbitals outside [0,{n_qubits - 1}].")
-        references.append(occupied)
-    references = sorted(set(references))
-    if not references:
-        raise RuntimeError("No Slater determinants found in nucleus.get_basis().mb().")
+
+        tmp.append(occupied)
+        if not tmp:
+            raise RuntimeError("No Slater determinants found in nucleus.get_basis().mb().")
+
+    all = {q for occupied in tmp for q in occupied}
+
+    if max(all) < n_qubits:
+        # indexes are correct
+        shift = 0
+    else:
+        # we shift the indexes so they are not bigger than nqubits
+        shift = min(all)
+        if max(all) - shift >= n_qubits:
+            raise ValueError(
+                f"Basis indexes ({sorted(all)}) are overflowing the list "
+                f"of size {n_qubits} orbitals after a shift of {shift}. "
+            )
+        LOGGER.info(
+            "Basis indexes shifted %d: %s -> [0,%d] ",
+            shift, sorted(all), n_qubits - 1,
+        )
+
+    references = sorted({tuple(q - shift for q in occupied) for occupied in tmp})
     return references
+
 
 
 def diagonal_energy(occupied_orbitals: tuple[int, ...], qubit_hamiltonian: Any) -> float:
