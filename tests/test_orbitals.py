@@ -93,11 +93,73 @@ def test_fermionic_relabeling_preserves_coefficients_actions_and_constants():
     assert mapping.fermionic_operator(operator).terms == {((0, 1), (1, 0)): 2j, (): 1.5}
 
 
-def test_he6_workflow_with_both_beta_methods():
+@pytest.mark.parametrize("width", [6, 12])
+@pytest.mark.parametrize("hamiltonian_local,pool_local", [(False, False), (True, True), (False, True), (True, False)])
+def test_independent_operator_conventions_without_requiring_a_library_version(monkeypatch, width, hamiltonian_local, pool_local):
+    from scipy.sparse import csr_matrix
+    from pynucshell.circuit.encodings import jordan_wigner
+    from vqd_nuclear import hamiltonian
+
+    def hopping(offset):
+        operator = FermionicOperator(((offset, 1), (offset + 1, 0)), 2j)
+        operator += FermionicOperator(((offset + 1, 1), (offset, 0)), -2j)
+        operator += FermionicOperator((), 1.5)
+        return operator
+
+    def excitation(offset):
+        return (FermionicOperator(((offset, 1), (offset + 1, 0)))
+                - FermionicOperator(((offset + 1, 1), (offset, 0))))
+
+    nucleus = SimpleNamespace(
+        N_protons=0, N_neutrons=1,
+        get_space=lambda: SimpleNamespace(mapping=list(range(2 * width)), isospin=[1] * width + [-1] * width),
+        get_fermionic=lambda prune: hopping(0 if hamiltonian_local else width),
+        operator_pool=lambda: [excitation(0 if pool_local else width)],
+    )
+    monkeypatch.setattr(hamiltonian, "build_nuclear_hamiltonian", lambda config: nucleus)
+    monkeypatch.setattr(hamiltonian, "exact_lowest_energies", lambda *args, **kwargs:
+                        (np.array([1.5]), np.eye(1), csr_matrix([[1.5]])))
+    data = hamiltonian.build_hamiltonian_data(ProblemConfig(), n_states=1)
+    assert data.n_qubits == width
+    assert data.orbital_mapping.determinant((width,)) == (0,)
+    assert data.qubit_hamiltonian == jordan_wigner(hopping(0))
+    assert data.fermionic_pool[0] == excitation(0)
+    assert data.qubit_pool[0] == jordan_wigner(excitation(0))
+    assert data.hamiltonian_index_mapping == {q if hamiltonian_local else q + width: q for q in range(width)}
+    assert data.pool_index_mapping == {q if pool_local else q + width: q for q in range(width)}
+
+
+def test_operator_convention_checks_the_whole_pool_and_rejects_ambiguity():
+    # Nonidentity overlapping label spaces: the largest used index is not a safe rule.
+    mapping = OrbitalMapping({1: 0, 3: 1}, (-1, -1), 0, 1)
+    ambiguous = FermionicOperator(((1, 1), (1, 0)))
+    with pytest.raises(ValueError, match="Ambiguous"):
+        mapping.operator_to_qubit([ambiguous])
+    global_only = FermionicOperator(((3, 1), (3, 0)))
+    source_map = mapping.operator_to_qubit([ambiguous, global_only])
+    assert source_map == {1: 0, 3: 1}
+    assert mapping.fermionic_operator(ambiguous, index_mapping=source_map).terms == {((0, 1), (0, 0)): 1.0}
+    local_only = FermionicOperator(((0, 1), (0, 0)))
+    with pytest.raises(ValueError, match="neither"):
+        mapping.operator_to_qubit([local_only, global_only])
+
+
+def test_local_sparse_operator_retains_unused_modes_and_constant_terms():
+    mapping = OrbitalMapping({q + 12: q for q in range(12)}, (-1,) * 12, 0, 1)
+    operator = FermionicOperator(((5, 1), (5, 0)), 2.0)
+    operator += FermionicOperator((), 1.5)
+    source_map = mapping.operator_to_qubit([operator])
+    assert source_map == {q: q for q in range(12)}
+    assert mapping.fermionic_operator(operator, index_mapping=source_map) == operator
+    assert mapping.n_qubits == 12
+
+
+@pytest.mark.parametrize("protons,neutrons", [(0, 2), (2, 0)], ids=["He6", "Be6"])
+def test_he6_workflow_with_both_beta_methods(protons, neutrons):
     from vqd_nuclear import FullQuantumLimits, NumericalConfig, RunConfig, run_workflow
 
     output = run_workflow(
-        ProblemConfig(shell="p", n_valence_protons=0, n_valence_neutrons=2, total_j=0),
+        ProblemConfig(shell="p", n_valence_protons=protons, n_valence_neutrons=neutrons, total_j=0),
         RunConfig(n_states=2, run_full_quantum_circuit=False, n_workers=1, seed=47433),
         NumericalConfig(max_adapt_iter=6, optimizer_maxiter=1000, n_jobs=1,
                         grad_tol=1e-5, new_theta_tol=1e-5, energy_improvement_tol=1e-6),

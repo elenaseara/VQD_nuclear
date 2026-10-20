@@ -9,6 +9,7 @@ __pycache__/
 htmlcov/
 
 # Virtual environments
+.compat_pynucshell/
 .venv/
 venv/
 env/

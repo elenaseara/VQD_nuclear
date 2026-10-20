@@ -31,6 +31,8 @@ class HamiltonianData:
     backend: QiboCircuitBackend
     encoding: Any
     orbital_mapping: OrbitalMapping
+    hamiltonian_index_mapping: dict[int, int]
+    pool_index_mapping: dict[int, int]
 
 
 def build_nuclear_hamiltonian(config: ProblemConfig) -> Any:
@@ -59,7 +61,8 @@ def exact_lowest_energies(nucleus: Any, n_states: int) -> tuple[np.ndarray, np.n
     so that validation and beta selection still receive meaningful exact
     energies.
     """
-    matrix = pns.Simulator(nucleus._ham, nucleus._basis).to_csr()
+    # Public API handles Simulator's changed constructor in PyNucShell 0.1.16.
+    matrix = nucleus.to_csr()
     dim = int(matrix.shape[0])
     requested = max(1, int(n_states))
 
@@ -86,8 +89,15 @@ def build_hamiltonian_data(config: ProblemConfig, n_states: int) -> HamiltonianD
     backend = QiboCircuitBackend()
     encoding = jordan_wigner
     orbital_mapping = OrbitalMapping.from_nucleus(nucleus)
-    qubit_hamiltonian = encoding(orbital_mapping.fermionic_operator(nucleus.get_fermionic(prune=True)))
-    fermionic_pool = [orbital_mapping.fermionic_operator(op) for op in nucleus.operator_pool()]
+    source_hamiltonian = nucleus.get_fermionic(prune=True)
+    source_pool = list(nucleus.operator_pool())
+    hamiltonian_index_mapping = orbital_mapping.operator_to_qubit([source_hamiltonian])
+    pool_index_mapping = orbital_mapping.operator_to_qubit(source_pool)
+    qubit_hamiltonian = encoding(orbital_mapping.fermionic_operator(
+        source_hamiltonian, index_mapping=hamiltonian_index_mapping,
+    ))
+    fermionic_pool = [orbital_mapping.fermionic_operator(op, index_mapping=pool_index_mapping)
+                      for op in source_pool]
     qubit_pool = [encoding(operator) for operator in fermionic_pool]
     qubit_generator_pool = [(-1j) * operator for operator in qubit_pool]
     n_qubits = orbital_mapping.n_qubits
@@ -108,4 +118,6 @@ def build_hamiltonian_data(config: ProblemConfig, n_states: int) -> HamiltonianD
         backend=backend,
         encoding=encoding,
         orbital_mapping=orbital_mapping,
+        hamiltonian_index_mapping=hamiltonian_index_mapping,
+        pool_index_mapping=pool_index_mapping,
     )

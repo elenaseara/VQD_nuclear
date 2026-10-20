@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Iterable
 
 from pynucshell.operators import FermionicOperator
 
@@ -51,16 +51,39 @@ class OrbitalMapping:
             raise ValueError("Determinant does not preserve the requested proton/neutron counts.")
         return occupied
 
-    def fermionic_operator(self, operator: Any) -> FermionicOperator:
+    def operator_to_qubit(self, operators: Iterable[Any]) -> dict[int, int]:
+        """Resolve one collection's global or already-local fermionic labels.
+
+        Check every used label against both complete mode spaces. Resolve the
+        Hamiltonian and pool independently; never infer a convention from only
+        the largest label or from an individual sparse pool element. If both
+        conventions fit but map a used label differently, require an explicit
+        map rather than silently changing the physical orbital.
+        """
+        labels = {int(label) for operator in operators
+                  for term, coefficient in operator.terms.items() if coefficient != 0
+                  for label, _ in term}
+        candidates = [mapping for mapping in (self.global_to_qubit, {q: q for q in range(self.n_qubits)})
+                      if labels.issubset(mapping)]
+        if not candidates:
+            raise ValueError("Fermionic indices fit neither the global nor the local active orbital space.")
+        if len(candidates) == 2 and any(candidates[0][label] != candidates[1][label] for label in labels):
+            raise ValueError("Ambiguous fermionic orbital indices; an explicit operator index mapping is required.")
+        return dict(candidates[0])
+
+    def fermionic_operator(self, operator: Any, *, index_mapping: dict[int, int] | None = None) -> FermionicOperator:
         """Relabel before JW so that parity strings use the same active modes."""
+        source_to_qubit = self.global_to_qubit if index_mapping is None else index_mapping
         mapped = FermionicOperator()
         for term, coefficient in operator.terms.items():
             if coefficient == 0:
                 continue
             try:
-                local_term = tuple((self.global_to_qubit[int(label)], int(action)) for label, action in term)
+                local_term = tuple((source_to_qubit[int(label)], int(action)) for label, action in term)
             except KeyError as exc:
                 raise ValueError(f"Operator uses inactive orbital {exc.args[0]}.") from exc
+            if any(not 0 <= q < self.n_qubits for q, _ in local_term):
+                raise ValueError("Operator index mapping lies outside the qubit register.")
             for species in (1, -1):
                 change = sum(2 * action - 1 for q, action in local_term if self.qubit_species[q] == species)
                 if change != 0:

@@ -290,6 +290,8 @@ def write_single_readable_txt_report(path: Path, *, run_id: str, context: "VQDCo
         f"Detected CPU workers: {context.available_workers}",
         f"n_qubits: {context.hamiltonian.n_qubits}",
         f"Global orbitals -> JW qubits: {context.hamiltonian.orbital_mapping.global_to_qubit}",
+        f"Hamiltonian fermionic indices -> JW qubits: {context.hamiltonian.hamiltonian_index_mapping}",
+        f"Pool fermionic indices -> JW qubits: {context.hamiltonian.pool_index_mapping}",
         f"Reference occupied orbitals: {context.reference.occupied_orbitals}",
         f"Reference diagonal energy: {context.reference.diagonal_energy:.12f}",
         f"First active operator: {context.reference.first_active_operator}",
@@ -385,6 +387,8 @@ def save_outputs(output: OutputConfig, *, run_id: str, problem: ProblemConfig, r
             "orbital_mapping": {
                 "global_to_qubit": context.hamiltonian.orbital_mapping.global_to_qubit,
                 "qubit_species": list(context.hamiltonian.orbital_mapping.qubit_species),
+                "hamiltonian_to_qubit": context.hamiltonian.hamiltonian_index_mapping,
+                "pool_to_qubit": context.hamiltonian.pool_index_mapping,
             },
             "statevector_results": [serializable_result(r) for r in statevector_results],
             "full_quantum_circuit_results": [serializable_result(r) for r in full_quantum_circuit_results],

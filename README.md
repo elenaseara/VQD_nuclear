@@ -4,6 +4,8 @@ This repository computes low-lying shell-model nuclear states using an ADAPT-VQD
 
 The many-body determinants, Hamiltonian and excitation pool share an explicit orbital mapping derived from the PyNucShell single-particle space. All orbitals of each populated species are retained. Neutron-only calculations use a compact register (6 qubits in the p shell, 12 in sd); mixed systems retain both species. Fermionic operators are relabeled before Jordan-Wigner encoding so parity strings follow the same convention as reference circuits. Reference selection checks every determinant energy against the shell-model matrix diagonal. TXT and JSON reports record the orbital mapping.
 
+PyNucShell 0.1.14 uses global fermionic labels, while 0.1.16 uses local labels for neutron-only Hamiltonians and excitation pools. Determinant labels remain global. The Hamiltonian and the complete pool are checked independently against the full global and local mode spaces before encoding. Ambiguous mappings are rejected; the convention is never inferred solely from the maximum index. Reports record separate maps for determinants, Hamiltonian terms and pool terms.
+
 The code supports two objective-evaluation routes:
 
 1. `statevector_exact`: the ansatz circuit is simulated as a dense statevector, and energies and overlaps are evaluated exactly from the simulator statevector.
