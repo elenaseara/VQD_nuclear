@@ -8,7 +8,7 @@ pytest.importorskip("pynucshell")
 pytest.importorskip("qibo")
 
 from pynucshell.operators import FermionicOperator
-from vqd_nuclear.ansatz import get_hamiltonian_basis_references, diagonal_energy
+from vqd_nuclear.ansatz import get_hamiltonian_basis_references, diagonal_energy, find_reference_from_hamiltonian_basis
 from vqd_nuclear.config import ProblemConfig
 from vqd_nuclear.hamiltonian import build_hamiltonian_data
 from vqd_nuclear.orbitals import OrbitalMapping
@@ -45,6 +45,12 @@ def test_mapping_energy_and_physical_sector(shell, width, protons, neutrons):
         data.nucleus, n_qubits=data.n_qubits, n_valence_particles=protons + neutrons,
         orbital_mapping=mapping,
     )
+    reference = find_reference_from_hamiltonian_basis(
+        ProblemConfig(shell=shell, n_valence_protons=protons, n_valence_neutrons=neutrons, total_j=0),
+        data.nucleus, n_qubits=data.n_qubits, orbital_mapping=mapping, shell_diagonal=data.matrix.diagonal(),
+    )
+    assert reference.basis_index == int(np.argmin(data.matrix.diagonal()))
+    assert reference.occupied_orbitals == list(references[reference.basis_index])
     inverse = {qubit: label for label, qubit in mapping.global_to_qubit.items()}
     basis = data.nucleus.get_basis().mb()
     physical_states = {sum(1 << q for q in occupied) for occupied in references}

@@ -36,6 +36,8 @@ class NumericalConfig:
     grad_tol: float = 5e-4
     max_candidates: int | None = None
     optimizer_maxiter: int = 1500
+    optimizer_tol: float = 5e-3
+    pool_policy: str = "reference_active"
     overlap_shots: int = 200000
     energy_shots: int = 200000
     new_theta_tol: float = 1e-3

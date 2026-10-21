@@ -67,3 +67,20 @@ def test_cli_rejects_manual_beta():
     with pytest.raises(SystemExit) as exc:
         cli.build_parser().parse_args(["--beta", "3.0"])
     assert exc.value.code == 2
+
+
+def test_cli_adapt_diagnostic_controls():
+    cli = load_run_vqd_module()
+    args = cli.build_parser().parse_args([
+        "--optimizer-tol", "1e-8", "--pool-policy", "full",
+        "--new-theta-tol", "0", "--energy-improvement-tol", "0",
+    ])
+    assert args.optimizer_tol == 1e-8
+    assert args.pool_policy == "full"
+    assert args.new_theta_tol == args.energy_improvement_tol == 0
+
+
+def test_cli_rejects_operator_reuse():
+    cli = load_run_vqd_module()
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(["--allow-operator-reuse"])

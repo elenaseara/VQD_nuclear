@@ -33,10 +33,14 @@ $MaxAdaptIterations = 20
 $GradientTolerance = 1e-5
 $EnergyImprovementTolerance = 1e-6
 $NewThetaTolerance = 1e-5
+# Cero en EnergyImprovementTolerance o NewThetaTolerance desactiva la parada combinada.
 # $null usa todo el pool; un entero limita los candidatos por iteracion.
 $MaxCandidates = $null
 $GradientMethod = "analytic"
 $OptimizerMaxIterations = 1000
+$OptimizerTolerance = 5e-3
+# reference_active conserva el filtro original; full prueba todo el pool.
+$PoolPolicy = "reference_active"
 $MeasurementStrategy = "paper"
 # Los shots solo se usan en full_quantum_circuit o both.
 $EnergyShots = 500000
@@ -91,6 +95,9 @@ if ($Shell -notin @("p", "sd") -or $Mode -notin @("statevector_exact", "full_qua
 if ($GradientMethod -notin @("analytic", "finite_difference") -or $MeasurementStrategy -notin @("paper", "qwc")) {
     throw "Revisa GradientMethod y MeasurementStrategy."
 }
+if ($PoolPolicy -notin @("reference_active", "full")) {
+    throw "Revisa PoolPolicy: reference_active o full."
+}
 if ($Protons -lt 0 -or $Neutrons -lt 0 -or $NStates -lt 1) {
     throw "Los nucleones deben ser no negativos y NStates positivo."
 }
@@ -100,8 +107,8 @@ if ($MaxAdaptIterations -lt 1 -or $OptimizerMaxIterations -lt 1 -or $NJobs -lt 1
 if ($null -ne $MaxCandidates -and $MaxCandidates -lt 1) {
     throw "MaxCandidates debe ser positivo o null."
 }
-if ($GradientTolerance -le 0 -or $EnergyImprovementTolerance -le 0 -or $NewThetaTolerance -le 0) {
-    throw "Las tolerancias deben ser positivas."
+if ($GradientTolerance -le 0 -or $OptimizerTolerance -le 0 -or $EnergyImprovementTolerance -lt 0 -or $NewThetaTolerance -lt 0) {
+    throw "Gradiente y optimizador: tolerancias positivas. Estancamiento y theta: cero desactiva el criterio."
 }
 if ($Mode -in @("full_quantum_circuit", "both") -and ($EnergyShots -lt 1 -or $OverlapShots -lt 1)) {
     throw "Los shots deben ser positivos."
@@ -120,6 +127,8 @@ $RunArguments = @(
     "--max-adapt-iter", "$MaxAdaptIterations",
     "--grad-tol", $GradientTolerance.ToString($InvariantCulture),
     "--optimizer-maxiter", "$OptimizerMaxIterations",
+    "--optimizer-tol", $OptimizerTolerance.ToString($InvariantCulture),
+    "--pool-policy", $PoolPolicy,
     "--energy-shots", "$EnergyShots",
     "--overlap-shots", "$OverlapShots",
     "--new-theta-tol", $NewThetaTolerance.ToString($InvariantCulture),
@@ -177,7 +186,7 @@ foreach ($BetaMethod in @("exact", "approximate")) {
     $Title = if ($BetaMethod -eq "exact") { "BETA CON DIAGONALIZACION EXACTA" } else { "BETA APROXIMADA" }
     Write-Host "`n$Title" -ForegroundColor Cyan
     $Summary | Where-Object { $_.beta_method -eq $BetaMethod } |
-        Select-Object method, state, beta, exact_energy, computed_energy, abs_error, n_layers |
+        Select-Object method, state, beta, exact_energy, computed_energy, abs_error, n_layers, stop_reason |
         Format-Table -AutoSize | Out-Host
 }
 Write-Host "Estado 0 = fundamental; 1 = primer excitado; 2 = segundo excitado."

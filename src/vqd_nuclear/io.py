@@ -62,6 +62,14 @@ def build_summary_dataframe(results: list[dict[str, Any]], label: str, run_id: s
             "signed_error": float(result.get("energy_error", np.nan)),
             "abs_error": float(result.get("abs_energy_error", np.nan)),
             "n_iterations": int(result.get("n_iterations", 0)),
+            "stop_reason": result.get("stop_reason", ""),
+            "stop_details": json.dumps(result.get("stop_details", {})),
+            "vqd_objective": float(result.get("vqd_objective", np.nan)),
+            "optimizer_tol": float(result.get("optimizer_tol", np.nan)),
+            "pool_policy": result.get("pool_policy", ""),
+            "exact_state_fidelities": json.dumps(result.get("exact_state_fidelities", [])),
+            "best_matching_exact_state": result.get("best_matching_exact_state", None),
+            "energy_variance": float(result.get("energy_variance", np.nan)),
             "n_layers": int(result.get("n_layers", 0)),
             "n_parameters": int(result.get("n_parameters", 0)),
             "overlap_shots": int(result.get("overlap_shots", 0)),
@@ -294,12 +302,18 @@ def write_single_readable_txt_report(path: Path, *, run_id: str, context: "VQDCo
         f"Pool fermionic indices -> JW qubits: {context.hamiltonian.pool_index_mapping}",
         f"Reference occupied orbitals: {context.reference.occupied_orbitals}",
         f"Reference diagonal energy: {context.reference.diagonal_energy:.12f}",
-        f"First active operator: {context.reference.first_active_operator}",
+        f"Reference basis index: {context.reference.basis_index}",
+        "Reference selection: minimum Hamiltonian diagonal; ties use first basis entry",
+        f"Pool size: {len(context.hamiltonian.qubit_generator_pool)}",
+        f"Reference-active operator indices: {context.active_operator_indices}",
         f"Beta check: {beta_check.get('message', '')}",
         f"Measurement strategy: {context.measurements.measurement_strategy}",
         f"Measurement circuits: {context.measurements.measurement_summary}",
     ]
     add_section("VQD RUN METADATA", "\n".join(metadata_lines))
+    add_section("OPERATOR POOL", "\n".join(
+        f"{index}: {generator}" for index, generator in enumerate(context.hamiltonian.qubit_generator_pool)
+    ))
     add_section("PROBLEM CONFIGURATION", "\n".join(f"{k}: {v}" for k, v in dataclass_to_dict(problem).items()))
     add_section("RUN CONFIGURATION", "\n".join(f"{k}: {v}" for k, v in dataclass_to_dict(run).items()))
     add_section("VQD NUMERICAL CONFIGURATION", "\n".join(f"{k}: {v}" for k, v in dataclass_to_dict(numerical).items()))
@@ -384,6 +398,12 @@ def save_outputs(output: OutputConfig, *, run_id: str, problem: ProblemConfig, r
             "numerical": dataclass_to_dict(numerical),
             "full_limits": dataclass_to_dict(full_limits),
             "beta_check": workflow_output["beta_check"],
+            "reference": {
+                "selection": "minimum_diagonal",
+                "basis_index": context.reference.basis_index,
+                "occupied_orbitals": context.reference.occupied_orbitals,
+                "diagonal_energy": context.reference.diagonal_energy,
+            },
             "orbital_mapping": {
                 "global_to_qubit": context.hamiltonian.orbital_mapping.global_to_qubit,
                 "qubit_species": list(context.hamiltonian.orbital_mapping.qubit_species),

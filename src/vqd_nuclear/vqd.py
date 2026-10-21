@@ -1,8 +1,7 @@
-"""ADAPT-VQD driver for ground and first-excited nuclear states."""
+"""ADAPT-VQD driver for ground and excited nuclear states."""
 from __future__ import annotations
 
 from dataclasses import dataclass
-from functools import partial
 from typing import Any
 import logging
 
@@ -11,7 +10,7 @@ from scipy.optimize import minimize
 
 import qibo
 
-from .ansatz import AnsatzBuilder, find_reference_from_hamiltonian_basis, prepare_generator_term_pool
+from .ansatz import AnsatzBuilder, find_reference_from_hamiltonian_basis, get_hamiltonian_basis_references, prepare_generator_term_pool
 from .config import FullQuantumLimits, NumericalConfig, ProblemConfig, RunConfig, apply_optional_caps, dataclass_to_dict, detect_hpc_workers
 from .hamiltonian import HamiltonianData, build_hamiltonian_data
 from .measurements import MeasurementEngine
@@ -61,9 +60,6 @@ def build_context(problem: ProblemConfig, run: RunConfig, numerical: NumericalCo
         problem,
         hamiltonian.nucleus,
         n_qubits=hamiltonian.n_qubits,
-        qubit_hamiltonian=hamiltonian.qubit_hamiltonian,
-        qubit_generator_pool=hamiltonian.qubit_generator_pool,
-        backend=hamiltonian.backend,
         orbital_mapping=hamiltonian.orbital_mapping,
         shell_diagonal=hamiltonian.matrix.diagonal(),
     )
@@ -114,13 +110,14 @@ def find_active_operators(ansatz_builder: AnsatzBuilder, *, operator_count: int,
     return [int(value) for value in values if value is not None]
 
 
-def get_candidate_operators(context: VQDContext, max_candidates: int | None = None) -> list[int]:
+def get_candidate_operators(context: VQDContext, max_candidates: int | None = None, *, pool_policy: str = "reference_active") -> list[int]:
     """Return active candidate operators, optionally truncated for quick tests."""
-    candidates = list(context.active_operator_indices)
+    if pool_policy not in {"reference_active", "full"}:
+        raise ValueError("pool_policy must be 'reference_active' or 'full'.")
+    candidates = (list(context.active_operator_indices) if pool_policy == "reference_active"
+                  else list(range(len(context.hamiltonian.qubit_generator_pool))))
     if max_candidates is not None:
         candidates = candidates[: min(int(max_candidates), len(candidates))]
-    if not candidates:
-        raise RuntimeError("No active ADAPT operators available for the selected reference.")
     return candidates
 
 
@@ -177,16 +174,23 @@ def analytic_gradient(task):
     return int(operator_index), float(gradient)
 
 
-def select_next_operator(context: VQDContext, thetas: list[float], operator_indices: list[int], previous_ansatze: list[dict[str, Any]], betas: list[float], *, eps: float, max_candidates: int | None, n_jobs: int | str | None, overlap_shots: int, energy_shots: int, cost_mode: str, gradient_method: str = "analytic") -> tuple[int | None, float]:
-    """Select the unused candidate with the largest absolute ADAPT gradient.
+def _eligible_operator_indices(candidates: list[int], operator_indices: list[int]) -> list[int]:
+    """Allow reuse except for the operator selected in the preceding iteration."""
+    last_operator = operator_indices[-1] if operator_indices else None
+    return [idx for idx in candidates if idx != last_operator]
+
+
+def select_next_operator(context: VQDContext, thetas: list[float], operator_indices: list[int], previous_ansatze: list[dict[str, Any]], betas: list[float], *, eps: float, max_candidates: int | None, n_jobs: int | str | None, overlap_shots: int, energy_shots: int, cost_mode: str, gradient_method: str = "analytic", pool_policy: str = "reference_active") -> tuple[int | None, float]:
+    """Select the eligible candidate with the largest absolute ADAPT gradient.
 
     The default uses the analytic gradient of the full VQD objective. For
     excited states, this includes the derivative of the overlap-penalty terms.
     The legacy finite-difference path remains available for comparisons with
     ``gradient_method=finite_difference``.
     """
-    used = set(operator_indices)
-    candidates = [idx for idx in get_candidate_operators(context, max_candidates) if idx not in used]
+    candidates = _eligible_operator_indices(
+        get_candidate_operators(context, max_candidates, pool_policy=pool_policy), operator_indices,
+    )
     if not candidates:
         return None, 0.0
     if gradient_method == "analytic":
@@ -197,13 +201,23 @@ def select_next_operator(context: VQDContext, thetas: list[float], operator_indi
         gradients = parallel_map(finite_difference_gradient, tasks, n_jobs=n_jobs, available_workers=context.available_workers)
     else:
         raise ValueError("gradient_method must be 'analytic' or 'finite_difference'.")
+    if not all(np.isfinite(value) for _, value in gradients):
+        raise ValueError("Non-finite ADAPT gradient.")
     return max(gradients, key=lambda item: abs(item[1]))
 
 
-def optimize_ansatz(context: VQDContext, thetas: list[float], operator_indices: list[int], previous_ansatze: list[dict[str, Any]], betas: list[float], *, overlap_shots: int, energy_shots: int, optimizer_maxiter: int, n_jobs: int | str | None, cost_mode: str):
-    """Optimize the current ADAPT-VQD ansatz using COBYLA."""
+def optimize_ansatz(context: VQDContext, thetas: list[float], operator_indices: list[int], previous_ansatze: list[dict[str, Any]], betas: list[float], *, overlap_shots: int, energy_shots: int, optimizer_maxiter: int, n_jobs: int | str | None, cost_mode: str, optimizer_tol: float = 5e-3):
+    """Optimize all parameters, retaining the best evaluated point, including x0.
+
+    In sampled mode this protects the measured objective only; independent
+    measurements still fluctuate and do not imply exact monotonicity.
+    """
+    best_x = np.asarray(thetas, dtype=float).copy()
+    best_value = np.inf
+
     def objective(x: np.ndarray) -> float:
-        return vqd_cost(
+        nonlocal best_x, best_value
+        value = vqd_cost(
             context,
             list(x),
             operator_indices,
@@ -214,14 +228,25 @@ def optimize_ansatz(context: VQDContext, thetas: list[float], operator_indices: 
             n_jobs=n_jobs,
             cost_mode=cost_mode,
         )
+        if np.isfinite(value) and value < best_value:
+            best_x, best_value = np.asarray(x, dtype=float).copy(), float(value)
+        return value
 
+    initial_value = objective(best_x)
+    if not np.isfinite(initial_value):
+        raise ValueError("Non-finite initial VQD objective.")
     result = minimize(
         objective,
         np.asarray(thetas, dtype=float),
         method="COBYLA",
-        options={"maxiter": int(optimizer_maxiter), "rhobeg": 0.03, "tol": 5e-3},
+        options={"maxiter": int(optimizer_maxiter), "rhobeg": 0.03, "tol": float(optimizer_tol)},
     )
-    return list(result.x), float(result.fun), result
+    result.raw_x = np.asarray(result.x).copy()
+    result.raw_fun = float(result.fun)
+    result.initial_fun = float(initial_value)
+    result.used_best_evaluated = not np.array_equal(result.raw_x, best_x)
+    result.x, result.fun = best_x, best_value
+    return list(best_x), float(best_value), result
 
 
 def compute_previous_overlaps(context: VQDContext, thetas: list[float], operator_indices: list[int], previous_ansatze: list[dict[str, Any]], *, n_jobs: int | str | None, cost_mode: str, overlap_shots: int) -> list[float]:
@@ -240,19 +265,62 @@ def evaluate_energy(context: VQDContext, thetas: list[float], operator_indices: 
     return context.measurements.statevector_energy(thetas, operator_indices)
 
 
-def run_adapt_vqd(context: VQDContext, *, previous_ansatze: list[dict[str, Any]] | None = None, betas: list[float] | None = None, max_adapt_iter: int = 20, grad_tol: float = 2e-4, max_candidates: int | None = None, n_jobs: int | str | None = None, overlap_shots: int = 200000, energy_shots: int = 200000, optimizer_maxiter: int = 200, new_theta_tol: float = 1e-3, energy_improvement_tol: float = 1e-4, cost_mode: str = "statevector_exact", gradient_method: str = "analytic", store_history: bool = True) -> dict[str, Any]:
+def exact_state_diagnostics(context: VQDContext, thetas: list[float], operator_indices: list[int]) -> dict[str, Any]:
+    """Project the simulator state onto the ordered shell-model eigenbasis.
+
+    These are simulator validation quantities, not sampled measurements. For
+    degeneracies, individual eigenvector fidelities depend on the chosen basis.
+    """
+    data = context.hamiltonian
+    if data.exact_vectors is None:
+        return {}
+    references = get_hamiltonian_basis_references(
+        data.nucleus, n_qubits=data.n_qubits,
+        n_valence_particles=context.problem.n_valence_protons + context.problem.n_valence_neutrons,
+        orbital_mapping=data.orbital_mapping,
+    )
+    indices = [sum(1 << (data.n_qubits - 1 - q) for q in occupied) for occupied in references]
+    state = np.asarray(context.ansatz_builder.state(thetas, operator_indices))[indices]
+    fidelities = np.abs(data.exact_vectors.conj().T @ state) ** 2
+    target = int(np.argmax(fidelities))
+    h_state = data.matrix @ state
+    energy = np.vdot(state, h_state).real
+    return {"exact_state_fidelities": fidelities.tolist(),
+            "best_matching_exact_state": int(target),
+            "shell_sector_probability": float(np.vdot(state, state).real),
+            "energy_variance": float(max(0.0, np.vdot(h_state, h_state).real - energy ** 2))}
+
+
+def run_adapt_vqd(context: VQDContext, *, previous_ansatze: list[dict[str, Any]] | None = None, betas: list[float] | None = None, max_adapt_iter: int = 20, grad_tol: float = 2e-4, max_candidates: int | None = None, n_jobs: int | str | None = None, overlap_shots: int = 200000, energy_shots: int = 200000, optimizer_maxiter: int = 200, new_theta_tol: float = 1e-3, energy_improvement_tol: float = 1e-4, cost_mode: str = "statevector_exact", gradient_method: str = "analytic", store_history: bool = True, optimizer_tol: float = 5e-3, pool_policy: str = "reference_active") -> dict[str, Any]:
     """Run ADAPT-VQD for one state."""
     previous_ansatze = previous_ansatze or []
     betas = betas or []
+    if len(previous_ansatze) != len(betas):
+        raise ValueError("VQD requires one beta per previous state.")
+    if max_adapt_iter < 0 or optimizer_maxiter < 1 or optimizer_tol <= 0 or grad_tol < 0:
+        raise ValueError("Invalid ADAPT/optimizer iteration limit or tolerance.")
+    if new_theta_tol < 0 or energy_improvement_tol < 0:
+        raise ValueError("Stagnation tolerances must be nonnegative; zero disables them.")
     workers = resolve_n_jobs(n_jobs, context.available_workers)
     thetas: list[float] = []
     operator_indices: list[int] = []
     history: list[dict[str, Any]] = []
-    max_layers = min(int(max_adapt_iter), len(get_candidate_operators(context, max_candidates)))
-    previous_objective: float | None = None
+    candidates = get_candidate_operators(context, max_candidates, pool_policy=pool_policy)
+    objective_options = dict(overlap_shots=overlap_shots, energy_shots=energy_shots, n_jobs=workers, cost_mode=cost_mode)
+    previous_objective = vqd_cost(context, thetas, operator_indices, previous_ansatze, betas, **objective_options)
     last_improvement: float | None = None
+    stop_reason = "max_iterations"
+    stop_details: dict[str, Any] = {
+        "pool_size": len(context.hamiltonian.qubit_generator_pool),
+        "reference_active_count": len(context.active_operator_indices),
+        "candidate_count": len(candidates), "eligible_count": len(candidates),
+        "selected_operator": None, "max_abs_gradient": None, "grad_tol": float(grad_tol),
+    }
+    n_iterations = 0
+    monotonicity_tol = 1e-10
 
-    for iteration in range(max_layers):
+    for iteration in range(int(max_adapt_iter)):
+        eligible = _eligible_operator_indices(candidates, operator_indices)
         operator_index, gradient = select_next_operator(
             context,
             thetas,
@@ -266,11 +334,36 @@ def run_adapt_vqd(context: VQDContext, *, previous_ansatze: list[dict[str, Any]]
             energy_shots=energy_shots,
             cost_mode=cost_mode,
             gradient_method=gradient_method,
+            pool_policy=pool_policy,
         )
+        stop_details = {
+            "pool_size": len(context.hamiltonian.qubit_generator_pool),
+            "reference_active_count": len(context.active_operator_indices),
+            "candidate_count": len(candidates),
+            "eligible_count": len(eligible),
+            "selected_operator": operator_index,
+            "max_abs_gradient": abs(float(gradient)),
+            "grad_tol": float(grad_tol),
+        }
         if operator_index is None:
+            stop_reason = "pool_exhausted"
             break
+        if abs(float(gradient)) < float(grad_tol):
+            stop_reason = "gradient_converged"
+            break
+        energy_before = evaluate_energy(context, thetas, operator_indices, cost_mode=cost_mode, energy_shots=energy_shots, n_jobs=workers)
+        old_thetas, old_ops = list(thetas), list(operator_indices)
         operator_indices.append(int(operator_index))
         thetas.append(0.0)
+        initial_thetas = list(thetas)
+        initial_objective = vqd_cost(context, thetas, operator_indices, previous_ansatze, betas, **objective_options)
+        embedding_error = float(initial_objective - previous_objective)
+        if cost_mode == "statevector_exact":
+            if (abs(embedding_error) > monotonicity_tol or not np.allclose(
+                context.ansatz_builder.state(old_thetas, old_ops),
+                context.ansatz_builder.state(thetas, operator_indices), rtol=0, atol=monotonicity_tol,
+            )):
+                raise RuntimeError("Appending a zero parameter changed the exact ansatz/objective.")
         thetas, objective_value, result = optimize_ansatz(
             context,
             thetas,
@@ -282,18 +375,38 @@ def run_adapt_vqd(context: VQDContext, *, previous_ansatze: list[dict[str, Any]]
             optimizer_maxiter=optimizer_maxiter,
             n_jobs=workers,
             cost_mode=cost_mode,
+            optimizer_tol=optimizer_tol,
         )
+        if not np.isfinite(objective_value) or objective_value > initial_objective:
+            thetas, objective_value = initial_thetas, initial_objective
+        # Include the reference objective in the first improvement as well.
+        last_improvement = float(previous_objective - objective_value)
+        n_iterations += 1
         energy = evaluate_energy(context, thetas, operator_indices, cost_mode=cost_mode, energy_shots=energy_shots, n_jobs=workers)
         overlaps = compute_previous_overlaps(context, thetas, operator_indices, previous_ansatze, n_jobs=workers, cost_mode=cost_mode, overlap_shots=overlap_shots)
         state_index = len(previous_ansatze)
         exact_target_energy = float(context.hamiltonian.exact_energies[state_index]) if len(context.hamiltonian.exact_energies) > state_index else np.nan
         energy_error = float(energy - exact_target_energy) if np.isfinite(exact_target_energy) else np.nan
         record = {
+            **stop_details,
             "iteration": int(iteration),
             "selected_operator": int(operator_index),
             "adapt_gradient": float(gradient),
             "physical_energy": float(energy),
             "vqd_objective": float(objective_value),
+            "physical_energy_before": float(energy_before),
+            "vqd_objective_before": float(previous_objective),
+            "initial_vqd_objective": float(initial_objective),
+            "zero_parameter_objective_error": embedding_error,
+            "objective_improvement": last_improvement,
+            "initial_thetas": initial_thetas,
+            "thetas": list(thetas),
+            "new_theta": float(thetas[-1]),
+            "optimizer_raw_objective": float(result.raw_fun),
+            "optimizer_raw_thetas": [float(x) for x in result.raw_x],
+            "optimizer_used_best_evaluated": bool(result.used_best_evaluated),
+            "energy_improvement_tol": float(energy_improvement_tol),
+            "new_theta_tol": float(new_theta_tol),
             "exact_target_energy": exact_target_energy,
             "energy_error": energy_error,
             "abs_energy_error": abs(energy_error) if np.isfinite(energy_error) else np.nan,
@@ -304,6 +417,8 @@ def run_adapt_vqd(context: VQDContext, *, previous_ansatze: list[dict[str, Any]]
             "optimizer_nfev": int(getattr(result, "nfev", -1)),
             "overlaps_with_previous": [float(x) for x in overlaps],
         }
+        if cost_mode == "statevector_exact":
+            record.update(exact_state_diagnostics(context, thetas, operator_indices))
         if store_history:
             history.append(record)
         LOGGER.info(
@@ -317,32 +432,34 @@ def run_adapt_vqd(context: VQDContext, *, previous_ansatze: list[dict[str, Any]]
             operator_index,
             np.array2string(np.asarray(thetas), precision=6),
         )
-        if previous_objective is not None:
-            # For excited-state VQD, the physical energy can increase while the
-            # penalized objective decreases because the orthogonality penalty is
-            # being reduced. Therefore convergence must be assessed with the
-            # VQD objective, not with the physical energy alone.
-            last_improvement = float(previous_objective) - float(objective_value)
-
-        small_gradient = abs(float(gradient)) < float(grad_tol)
-        stagnant_objective = last_improvement is not None and last_improvement < float(energy_improvement_tol)
-        tiny_new_parameter = len(thetas) > 0 and abs(float(thetas[-1])) < float(new_theta_tol)
-
-        # Do not stop only because the last theta is tiny: COBYLA and shot-based
-        # objectives can return a near-zero new parameter before the existing
-        # ansatz has fully relaxed. Require objective stagnation and a small
-        # analytic gradient as well.
-        if iteration > 0 and small_gradient:
-            break
-        if iteration > 0 and stagnant_objective and (small_gradient or tiny_new_parameter):
-            break
+        stagnant_objective = energy_improvement_tol > 0 and last_improvement < float(energy_improvement_tol)
+        tiny_new_parameter = new_theta_tol > 0 and abs(float(thetas[-1])) < float(new_theta_tol)
+        record["stagnant_objective"] = bool(stagnant_objective)
+        record["tiny_new_parameter"] = bool(tiny_new_parameter)
+        # A budget-limited optimizer can still yield a useful, accepted step.
+        # Report failure only when it also failed to improve the objective.
+        if not result.success and last_improvement <= monotonicity_tol:
+            stop_reason = "optimization_failure"
+        elif iteration > 0 and stagnant_objective and tiny_new_parameter:
+            stop_reason = "energy_stagnation"
+        else:
+            stop_reason = "max_iterations"
+        record["stop_reason"] = stop_reason if stop_reason != "max_iterations" else None
         previous_objective = float(objective_value)
+        if stop_reason != "max_iterations":
+            break
 
+    stop_details.update({"energy_improvement_tol": float(energy_improvement_tol), "new_theta_tol": float(new_theta_tol),
+                         "last_improvement": last_improvement, "new_theta": float(thetas[-1]) if thetas else None})
+    if history:
+        history[-1]["stop_reason"] = stop_reason
+    LOGGER.info("ADAPT state=%d stop_reason=%s diagnostics=%s", len(previous_ansatze), stop_reason, stop_details)
     final_energy = evaluate_energy(context, thetas, operator_indices, cost_mode=cost_mode, energy_shots=energy_shots, n_jobs=workers)
     state_index = len(previous_ansatze)
     exact_target_energy = float(context.hamiltonian.exact_energies[state_index]) if len(context.hamiltonian.exact_energies) > state_index else np.nan
     energy_error = float(final_energy - exact_target_energy) if np.isfinite(exact_target_energy) else np.nan
     return {
+        **(exact_state_diagnostics(context, thetas, operator_indices) if cost_mode == "statevector_exact" else {}),
         "state_index": int(state_index),
         "energy": float(final_energy),
         "exact_energy": exact_target_energy,
@@ -350,7 +467,15 @@ def run_adapt_vqd(context: VQDContext, *, previous_ansatze: list[dict[str, Any]]
         "abs_energy_error": abs(energy_error) if np.isfinite(energy_error) else np.nan,
         "thetas": [float(theta) for theta in thetas],
         "ops": [int(op) for op in operator_indices],
-        "n_iterations": int(len(history)),
+        "n_iterations": n_iterations,
+        "stop_reason": stop_reason,
+        "stop_details": stop_details,
+        "vqd_objective": float(previous_objective),
+        "monotonicity_tol": monotonicity_tol,
+        "pool_policy": pool_policy,
+        "pool_indices": list(range(len(context.hamiltonian.qubit_generator_pool))),
+        "reference_active_operator_indices": list(context.active_operator_indices),
+        "candidate_operator_indices": candidates,
         "n_layers": int(len(operator_indices)),
         "n_parameters": int(len(thetas)),
         "cost_mode": str(cost_mode),
@@ -358,6 +483,7 @@ def run_adapt_vqd(context: VQDContext, *, previous_ansatze: list[dict[str, Any]]
         "overlap_shots": int(overlap_shots),
         "energy_shots": int(energy_shots),
         "optimizer_maxiter": int(optimizer_maxiter),
+        "optimizer_tol": float(optimizer_tol),
         "max_adapt_iter": int(max_adapt_iter),
         "max_candidates": None if max_candidates is None else int(max_candidates),
         "grad_tol": float(grad_tol),
