@@ -98,6 +98,10 @@ def build_parser() -> argparse.ArgumentParser:
             "Hamiltonian terms; 'qwc' uses generic qubit-wise commuting Pauli grouping."
         ),
     )
+    parser.add_argument("--no-model-space", dest="use_model_space",
+        action="store_false",
+        help="Deactivates the fast path that uses the projection of the space"
+        "and forces the complete simulation of the circuits for statevector.")
     parser.add_argument("--n-jobs", default="all")
     parser.add_argument("--n-workers", default="auto")
     parser.add_argument("--qibo-backend", default=os.environ.get("QIBO_BACKEND", "numpy"))
@@ -172,6 +176,7 @@ def main() -> int:
         gradient_method=args.gradient_method,
         measurement_strategy=args.measurement_strategy,
         n_jobs=args.n_jobs,
+        use_model_space=args.use_model_space
     )
     full_limits = FullQuantumLimits()
     if args.flat_results:

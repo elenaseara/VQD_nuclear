@@ -48,6 +48,7 @@ class NumericalConfig:
     n_jobs: int | str = "all"
     selection_criterion: str = "full_vqd"
     collect_gradient_diagnostics: bool = False
+    use_model_space: bool = True
 
 
 @dataclass(slots=True)

@@ -91,11 +91,12 @@ class MeasurementEngine:
     *
     """
     def __init__(self, *, ansatz_builder: "AnsatzBuilder", qubit_hamiltonian: Any,
-                 n_qubits: int, available_workers: int, qubit_generator_pool=None, measurement_strategy: str = "paper") -> None:
+                 n_qubits: int, available_workers: int, qubit_generator_pool=None, measurement_strategy: str = "paper", model_space=None) -> None:
         self.ansatz_builder = ansatz_builder
         self.qubit_hamiltonian = qubit_hamiltonian
         self.n_qubits = int(n_qubits)
         self.qubit_generator_pool = list(qubit_generator_pool) or []
+        self.model_space = model_space
 
         if measurement_strategy not in {"paper", "qwc"}:
             raise ValueError("measurement_strategy must be 'paper' or 'qwc'.")
@@ -134,14 +135,27 @@ class MeasurementEngine:
         if key in self._energy_cache:
             self._energy_cache.move_to_end(key)
             return self._energy_cache[key]
-        state = self.ansatz_builder.state(thetas, operator_indices)
-        energy = qubit_operator_expectation_from_state(self.qubit_hamiltonian, state, self.n_qubits)
+
+        if self.model_space is not None and self.model_space.can_handle(operator_indices):
+            # Camino rapido: propagar y medir dentro del espacio del modelo.
+            energy = self.model_space.energy(thetas, operator_indices)
+        else:
+            state = self.ansatz_builder.state(thetas, operator_indices)
+            energy = qubit_operator_expectation_from_state(
+                self.qubit_hamiltonian, state, self.n_qubits)
+  
         self._cache_set(key, energy)
         return energy
 
 
     def exact_overlap(self, thetas_i: list[float], ops_i: list[int], thetas_k: list[float], ops_k: list[int]) -> float:
         """Compute |<psi_i|psi_k>|^2 exactly from cached simulator statevectors."""
+
+        if (self.model_space is not None
+                and self.model_space.can_handle(ops_i)
+                and self.model_space.can_handle(ops_k)):
+            return self.model_space.overlap(thetas_i, ops_i, thetas_k, ops_k)
+
         psi_i = self.ansatz_builder.state(thetas_i, ops_i)
         psi_k = self.ansatz_builder.state(thetas_k, ops_k)
         return float(abs(np.vdot(psi_i, psi_k)) ** 2)
@@ -267,7 +281,3 @@ class CandidateGradientScan:
     g_total: dict[int, float]
     max_overlap_amplitude: float      # max_j |<psi_j|psi>|
  
-
-
-
-

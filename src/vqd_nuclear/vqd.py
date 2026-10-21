@@ -11,12 +11,14 @@ from scipy.optimize import minimize
 
 import qibo
 
-from .ansatz import AnsatzBuilder, find_reference_from_hamiltonian_basis, prepare_generator_term_pool
+from .ansatz import AnsatzBuilder, find_reference_from_hamiltonian_basis, prepare_generator_term_pool, get_hamiltonian_basis_references
 from .config import FullQuantumLimits, NumericalConfig, ProblemConfig, RunConfig, apply_optional_caps, dataclass_to_dict, detect_hpc_workers
 from .hamiltonian import HamiltonianData, build_hamiltonian_data
-from .measurements import MeasurementEngine
+from .measurements import MeasurementEngine, apply_qubit_operator_to_state
 from .parallel import parallel_map, resolve_n_jobs
 from .validation import resolve_beta
+from .model_space import ModelSpaceEngine, model_space_indices
+
 
 LOGGER = logging.getLogger(__name__)
 
@@ -72,6 +74,21 @@ def build_context(problem: ProblemConfig, run: RunConfig, numerical: NumericalCo
         prepared_generator_term_pool=prepared_pool,
         reference_occupied_orbitals=reference.occupied_orbitals,
     )
+    model_space = None
+    if numerical.use_model_space:
+        referencias = get_hamiltonian_basis_references(
+            hamiltonian.nucleus,
+            n_qubits=hamiltonian.n_qubits,
+            n_valence_particles=problem.n_valence_protons + problem.n_valence_neutrons,
+        )
+        model_space = ModelSpaceEngine(
+            qubit_hamiltonian=hamiltonian.qubit_hamiltonian,
+            qubit_generator_pool=hamiltonian.qubit_generator_pool,
+            indices=model_space_indices(referencias, hamiltonian.n_qubits),
+            reference_occupied_orbitals=reference.occupied_orbitals,
+            n_qubits=hamiltonian.n_qubits,
+            apply_operator=apply_qubit_operator_to_state,
+        )
     measurements = MeasurementEngine(
         ansatz_builder=ansatz_builder,
         qubit_hamiltonian=hamiltonian.qubit_hamiltonian,
@@ -79,6 +96,7 @@ def build_context(problem: ProblemConfig, run: RunConfig, numerical: NumericalCo
         qubit_generator_pool=hamiltonian.qubit_generator_pool,
         available_workers=available_workers,
         measurement_strategy=numerical.measurement_strategy,
+        model_space=model_space,
     )
     active_operator_indices = find_active_operators(
         ansatz_builder,
@@ -201,7 +219,12 @@ def select_next_operator(context: VQDContext, thetas: list[float], operator_indi
         scores = scan.g_energy if selection_criterion == "energy_only" else scan.g_total
         if selection_criterion not in ("full_vqd", "energy_only"):
             raise ValueError("selection_criterion must be 'full_vqd' or 'energy_only'.")
-        winner = max(scan.candidates, key=lambda mu: abs(scores[mu]))
+
+        best = max(abs(scores[mu]) for mu in scan.candidates)
+        treshold = best * (1.0 - 1e-9)
+
+        winner = min(mu for mu in scan.candidates if abs(scores[mu]) >= treshold)
+        #winner = max(scan.candidates, key=lambda mu: abs(scores[mu]))
 
         return int(winner), float(scan.g_total[winner]), scan
     
@@ -451,8 +474,11 @@ def run_workflow(problem: ProblemConfig, run: RunConfig, numerical: NumericalCon
     statevector_results: list[dict[str, Any]] = []
     full_quantum_circuit_results: list[dict[str, Any]] = []
     numerical_options = dataclass_to_dict(numerical)
+
     # measurement_strategy configures MeasurementEngine and is not an ADAPT optimizer option.
+    # same with use_model_space to create ModelSpaceEngine
     numerical_options.pop("measurement_strategy", None)
+    numerical_options.pop("use_model_space", None)
 
     if run.run_statevector:
         statevector_results = run_vqd_family(context, cost_mode="statevector_exact", options=dict(numerical_options))
