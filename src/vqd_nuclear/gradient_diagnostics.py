@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from typing import Any
 
 
-# registro
 
 @dataclass(slots=True)
 class GradientDiagnostics:
@@ -21,8 +20,8 @@ class GradientDiagnostics:
     g_total: dict[int, float]
     ratio: dict[int, float]                 # |gP| / (|gE| + eps)
 
-    winner_energy_only: int                 # lo que elegiria la ruta full quantum
-    winner_full_vqd: int                    # lo que se elige realmente
+    winner_energy_only: int                 # lo que elegiria energy_only
+    winner_full_vqd: int                    # lo que elige vqd
     ranking_changed: bool
 
     gt_at_energy_winner: float
@@ -66,7 +65,7 @@ def build_diagnostics(scan, *, state_index: int = -1, iteration: int = -1,
                       epsilon: float = 1e-12) -> GradientDiagnostics:
     """Convierte un CandidateGradientScan en la comparacion de criterios.
 
-    No calcula nada cuantico: solo compara los numeros que ya vienen dados.
+    No calcula nada: solo compara los numeros que ya vienen dados.
     """
     candidates = list(scan.candidates)
     if not candidates:
@@ -101,61 +100,6 @@ def build_diagnostics(scan, *, state_index: int = -1, iteration: int = -1,
         max_overlap_amplitude=float(scan.max_overlap_amplitude),
         max_ratio=float(max(ratio.values())),
     )
-
-
-#  informes
-
-def summarize_diagnostics(records: list[GradientDiagnostics]) -> str:
-    """Informe de texto con el desglose POR ITERACION.
-
-    Una fraccion agregada ('coincidieron el 90% de las veces') puede ocultar
-    que las discrepancias esten concentradas en la iteracion 0, que es el caso
-    peligroso: ADAPT es voraz y una primera eleccion mala condiciona el resto
-    del ansatz. Con la politica de consumir operadores, ademas gasta uno de
-    los pocos cupos disponibles.
-    """
-    if not records:
-        return "Sin registros."
-
-    lineas: list[str] = []
-    cambios = sum(1 for r in records if r.ranking_changed)
-    lineas.append("=" * 76)
-    lineas.append("  INFLUENCIA DE g^penalty SOBRE LA SELECCION ADAPT")
-    lineas.append("=" * 76)
-    lineas.append(f"  iteraciones registradas : {len(records)}")
-    lineas.append(f"  el ranking cambia en    : {cambios} ({100*cambios/len(records):.0f}%)")
-    lineas.append("")
-
-    por_estado: dict[int, list[GradientDiagnostics]] = {}
-    for r in records:
-        por_estado.setdefault(r.state_index, []).append(r)
-
-    for estado in sorted(por_estado):
-        filas = sorted(por_estado[estado], key=lambda r: r.iteration)
-        lineas.append(f"  Estado {estado}")
-        lineas.append(f"    {'iter':>4} {'win_E':>6} {'win_T':>6} {'cambia':>7} "
-                      f"{'regret':>9} {'|<psi_j|psi>|':>14} {'max ratio':>11}")
-        for r in filas:
-            marca = "SI" if r.ranking_changed else "-"
-            lineas.append(f"    {r.iteration:>4} {r.winner_energy_only:>6} "
-                          f"{r.winner_full_vqd:>6} {marca:>7} "
-                          f"{r.regret:>9.3f} {r.max_overlap_amplitude:>14.3e} "
-                          f"{r.max_ratio:>11.3e}")
-        if any(r.iteration == 0 and r.ranking_changed for r in filas):
-            lineas.append("    AVISO: el ranking cambia en la ITERACION 0. ADAPT es voraz y")
-            lineas.append("           esa eleccion condiciona todo el ansatz posterior.")
-        lineas.append("")
-
-    lineas.append("  Lectura:")
-    lineas.append("    regret = 1 - |gT[ganador por energia]| / |gT[ganador correcto]|")
-    lineas.append("      0.00  -> mismo operador, o empate practico: la aproximacion no cuesta nada")
-    lineas.append("      ->1   -> energia sola elige un operador muy inferior en el objetivo real")
-    lineas.append("    |<psi_j|psi>| es la AMPLITUD de solapamiento, no su cuadrado: es la")
-    lineas.append("    variable que explica cuando pesa la penalizacion (grande al empezar")
-    lineas.append("    cada estado excitado, pequena al converger).")
-    lineas.append("    Un candidato con g^E = 0 y g^penalty != 0 es posible y legitimo:")
-    lineas.append("    conmuta con H (no cambia la energia) pero aleja de los estados previos.")
-    return "\n".join(lineas)
 
 
 def diagnostics_dataframe(records: list[GradientDiagnostics]):

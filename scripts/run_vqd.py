@@ -102,6 +102,18 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_false",
         help="Deactivates the fast path that uses the projection of the space"
         "and forces the complete simulation of the circuits for statevector.")
+    parser.add_argument("--selection-criterion",
+                        choices=["full_vqd", "energy_only"],
+                        default="full_vqd",
+                        help=(
+                            "Selects the criterion used to select operators, between "
+                            "g^E + g^penalty (full_vqd) or g^E (energy_only)."
+                        ),
+    )
+    parser.add_argument("--gradient-diagnostics", type=bool, default=False,
+        help="Stores, for each ADAPT iteration, the operator that would have"
+            "been selected by using g^E alone, instead of g^E + g^penalty.")
+    
     parser.add_argument("--n-jobs", default="all")
     parser.add_argument("--n-workers", default="auto")
     parser.add_argument("--qibo-backend", default=os.environ.get("QIBO_BACKEND", "numpy"))
@@ -176,6 +188,8 @@ def main() -> int:
         gradient_method=args.gradient_method,
         measurement_strategy=args.measurement_strategy,
         n_jobs=args.n_jobs,
+        selection_criterion=args.selection_criterion,
+        collect_gradient_diagnostics=args.gradient_diagnostics,
         use_model_space=args.use_model_space
     )
     full_limits = FullQuantumLimits()
