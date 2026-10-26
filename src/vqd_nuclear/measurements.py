@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
+from .sampling import (SampledMeasurements, PaperMeasurementPlan, bitstring_to_array,
+                       group_qubit_wise_commuting_terms, group_measurement_basis)
 
 if TYPE_CHECKING:
     from .ansatz import AnsatzBuilder
@@ -84,7 +86,7 @@ def commutator_energy_gradient(h_psi: np.array, a_psi: np.array) -> float:
     return float(2.0 * np.real(GRADIENT_PHASE * np.vdot(h_psi, a_psi)))
 
 
-class MeasurementEngine:
+class MeasurementEngine(SampledMeasurements):
     """Evaluate energies and overlaps using exact statevectors or sampled circuits."""
 
     """
@@ -95,7 +97,8 @@ class MeasurementEngine:
         self.ansatz_builder = ansatz_builder
         self.qubit_hamiltonian = qubit_hamiltonian
         self.n_qubits = int(n_qubits)
-        self.qubit_generator_pool = list(qubit_generator_pool) or []
+        self.qubit_generator_pool = list(qubit_generator_pool or [])
+        self.available_workers = int(available_workers)
         self.model_space = model_space
 
         if measurement_strategy not in {"paper", "qwc"}:
@@ -112,6 +115,33 @@ class MeasurementEngine:
         # fase 2: G_mu y su plan, cacheados por indice de candidato
         self._gradient_operators = {}
         self._gradient_plans = {}
+
+    @property
+    def _paper_plan(self):
+        if self._paper_plan_cache is None:
+            self._paper_plan_cache = PaperMeasurementPlan(self.qubit_hamiltonian)
+        return self._paper_plan_cache
+
+    @property
+    def _qwc_groups(self):
+        if self._qwc_groups_cache is None:
+            self._qwc_groups_cache = group_qubit_wise_commuting_terms(list(self.qubit_hamiltonian.terms))
+        return self._qwc_groups_cache
+
+    @property
+    def measurement_summary(self):
+        if self.measurement_strategy == "paper":
+            return self._paper_plan.summary()
+        return {"qwc": len(self._qwc_groups), "total": len(self._qwc_groups)}
+
+    def analytic_energy_gradient(self, thetas, operator_indices, generator, previous_ansatze=None, betas=None):
+        """Compatibility alias; the existing gradient formula is unchanged."""
+        return self.statevector_energy_gradient(thetas, operator_indices, generator)
+
+    def analytic_vqd_gradient(self, thetas, operator_indices, generator, previous_ansatze=None, betas=None):
+        """Compatibility alias forwarding to the existing full VQD gradient."""
+        previous_states = [self.ansatz_builder.state(p["thetas"], p["ops"]) for p in (previous_ansatze or [])]
+        return self.statevector_vqd_gradient(thetas, operator_indices, generator, previous_states, betas or [])[2]
 
 
 
@@ -280,4 +310,3 @@ class CandidateGradientScan:
     g_penalty: dict[int, float]
     g_total: dict[int, float]
     max_overlap_amplitude: float      # max_j |<psi_j|psi>|
- 

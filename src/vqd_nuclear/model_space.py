@@ -248,6 +248,10 @@ class ModelSpaceEngine:
 
         Sustituye a construir y simular el circuito de Qibo.
         """
+        if len(thetas) != len(operator_indices):
+            raise ValueError("Each model-space operator requires exactly one parameter.")
+        if any(not 0 <= int(mu) < len(self.qubit_generator_pool) for mu in operator_indices):
+            raise ValueError("Model-space operator index is outside the pool.")
         key = self._key(thetas, operator_indices)
         cacheado = self._cache.get(key)
         if cacheado is not None:

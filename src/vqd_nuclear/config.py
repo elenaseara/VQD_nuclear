@@ -49,6 +49,8 @@ class NumericalConfig:
     selection_criterion: str = "full_vqd"
     collect_gradient_diagnostics: bool = False
     use_model_space: bool = True
+    identity_tol: float = 1e-10
+    acceptance_tol: float = 1e-12
 
 
 @dataclass(slots=True)

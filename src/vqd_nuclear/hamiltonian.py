@@ -10,9 +10,9 @@ from scipy.sparse.linalg import eigsh
 import pynucshell as pns
 from pynucshell.circuit.backends.qibo_backend import QiboCircuitBackend
 from pynucshell.circuit.encodings import jordan_wigner
-from pynucshell.circuit.solvers import ADAPTVQE
 
 from .config import ProblemConfig
+from .orbitals import OrbitalMapping
 
 
 @dataclass(slots=True)
@@ -30,6 +30,8 @@ class HamiltonianData:
     n_qubits: int
     backend: QiboCircuitBackend
     encoding: Any
+    orbital_mapping: OrbitalMapping
+    pool_metadata: dict[str, Any]
 
 
 def build_nuclear_hamiltonian(config: ProblemConfig) -> Any:
@@ -77,28 +79,6 @@ def exact_lowest_energies(nucleus: Any, n_states: int) -> tuple[np.ndarray, np.n
     return np.asarray(values[order], dtype=float), vectors[:, order], matrix
 
 
-def infer_nqubits_from_pool(qubit_op_pool: list[Any]) -> int:
-    """Infer the JW qubit count from the encoded operator pool."""
-    max_qubit = -1
-    for operator in qubit_op_pool:
-        for term in operator.terms:
-            for qubit, _pauli in term:
-                max_qubit = max(max_qubit, int(qubit))
-    if max_qubit < 0:
-        raise RuntimeError("Could not infer the number of qubits from the operator pool.")
-    return max_qubit + 1
-
-
-def extract_qubit_hamiltonian(adaptvqe_helper: ADAPTVQE) -> Any:
-    """Retrieve the qubit Hamiltonian generated internally by pynucshell."""
-    for attr in ("qubit_hamiltonian", "qubit_ham", "observable", "hamiltonian", "ham_op"):
-        if hasattr(adaptvqe_helper, attr):
-            candidate = getattr(adaptvqe_helper, attr)
-            if hasattr(candidate, "terms"):
-                return candidate
-    raise RuntimeError("Could not find a qubit Hamiltonian in the ADAPTVQE helper.")
-
-
 def build_hamiltonian_data(config: ProblemConfig, n_states: int) -> HamiltonianData:
     """Construct all Hamiltonian objects needed by the VQD workflow."""
     nucleus = build_nuclear_hamiltonian(config)
@@ -106,14 +86,16 @@ def build_hamiltonian_data(config: ProblemConfig, n_states: int) -> HamiltonianD
 
     backend = QiboCircuitBackend()
     encoding = jordan_wigner
-    helper = ADAPTVQE(encoding, backend)
-    helper.load_nucleus(nucleus)
-    qubit_hamiltonian = extract_qubit_hamiltonian(helper)
-
-    fermionic_pool = list(nucleus.operator_pool())
+    mapping = OrbitalMapping.from_nucleus(nucleus)
+    source_hamiltonian = nucleus.get_fermionic(prune=True)
+    source_pool = list(nucleus.operator_pool())
+    h_mapping = mapping.operator_mapping([source_hamiltonian])
+    pool_mapping = mapping.operator_mapping(source_pool)
+    qubit_hamiltonian = encoding(mapping.operator(source_hamiltonian, h_mapping))
+    fermionic_pool = [mapping.operator(operator, pool_mapping) for operator in source_pool]
     qubit_pool = [encoding(operator) for operator in fermionic_pool]
     qubit_generator_pool = [(-1j) * operator for operator in qubit_pool]
-    n_qubits = infer_nqubits_from_pool(qubit_pool)
+    n_qubits = mapping.n_qubits
 
     return HamiltonianData(
         nucleus=nucleus,
@@ -127,4 +109,15 @@ def build_hamiltonian_data(config: ProblemConfig, n_states: int) -> HamiltonianD
         n_qubits=n_qubits,
         backend=backend,
         encoding=encoding,
+        orbital_mapping=mapping,
+        pool_metadata={
+            "construction": "PyNucShell nucleus.operator_pool() over the entire many-body basis",
+            "representation": "M_scheme", "requested_M": config.total_j,
+            "preserves": ["N_protons", "N_neutrons", "M"], "exact_J_guaranteed": False,
+            "pool_size_initial": len(source_pool), "pool_size_after_reference": len(source_pool),
+            "reference_filter_applied": False, "structural_exclusions": [],
+            "library_restriction": "two-body transitions present in H connecting determinants of the sector",
+            "global_to_qubit": mapping.global_to_qubit,
+            "hamiltonian_index_mapping": h_mapping, "pool_index_mapping": pool_mapping,
+        },
     )

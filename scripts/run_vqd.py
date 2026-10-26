@@ -68,7 +68,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--max-adapt-iter", type=int, default=20)
     parser.add_argument("--grad-tol", type=float, default=5e-4)
-    parser.add_argument("--max-candidates", type=int, default=None)
+    parser.add_argument("--max-candidates", type=int, default=None,
+                        help="Explicit diagnostic cap on candidate IDs; default scans the full physical pool.")
     parser.add_argument("--optimizer-maxiter", type=int, default=1500)
     parser.add_argument("--cobyla-rhobeg", type=float, default=0.03,
                         help="Radio inicial del simplex de COBYLA.")
@@ -78,6 +79,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--energy-shots", type=int, default=200000)
     parser.add_argument("--new-theta-tol", type=float, default=1e-3)
     parser.add_argument("--energy-improvement-tol", type=float, default=1e-4)
+    parser.add_argument("--identity-tol", type=float, default=1e-10,
+                        help="Absolute numerical tolerance for zero-layer state/cost identity checks.")
+    parser.add_argument("--acceptance-tol", type=float, default=1e-12,
+                        help="Numerical tolerance for accepted-cost consistency and optimizer progress.")
     parser.add_argument(
         "--gradient-method",
         choices=["analytic", "finite_difference"],
@@ -190,7 +195,9 @@ def main() -> int:
         n_jobs=args.n_jobs,
         selection_criterion=args.selection_criterion,
         collect_gradient_diagnostics=args.gradient_diagnostics,
-        use_model_space=args.use_model_space
+        use_model_space=args.use_model_space,
+        identity_tol=args.identity_tol,
+        acceptance_tol=args.acceptance_tol,
     )
     full_limits = FullQuantumLimits()
     if args.flat_results:

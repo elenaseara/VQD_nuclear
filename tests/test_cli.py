@@ -59,3 +59,11 @@ def test_cli_measurement_strategy_qwc_is_accepted():
     cli = load_run_vqd_module()
     args = cli.build_parser().parse_args(["--measurement-strategy", "qwc"])
     assert args.measurement_strategy == "qwc"
+
+
+def test_pdf_tolerances_and_existing_gradient_default():
+    cli = load_run_vqd_module()
+    args = cli.build_parser().parse_args(["--identity-tol", "1e-9", "--acceptance-tol", "1e-13"])
+    assert args.identity_tol == 1e-9
+    assert args.acceptance_tol == 1e-13
+    assert args.selection_criterion == "full_vqd"

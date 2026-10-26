@@ -20,4 +20,5 @@ def test_build_context_smoke():
     numerical = NumericalConfig(max_adapt_iter=1, max_candidates=2, optimizer_maxiter=5, n_jobs=1)
     context = build_context(problem, run, numerical, qibo_backend="numpy")
     assert context.hamiltonian.n_qubits > 0
-    assert len(context.active_operator_indices) > 0
+    assert context.base_operator_indices == tuple(range(len(context.hamiltonian.qubit_generator_pool)))
+    assert len(context.base_operator_indices) > 0

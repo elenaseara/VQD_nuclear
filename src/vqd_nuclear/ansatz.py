@@ -1,6 +1,5 @@
 """Reference-state selection and ADAPT ansatz construction."""
 from __future__ import annotations
-import logging
 
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -15,16 +14,13 @@ from pynucshell.operators import QubitOperator
 
 from .config import ProblemConfig
 
-LOGGER = logging.getLogger(__name__)
-
 @dataclass(slots=True)
 class ReferenceData:
     """Selected Slater-determinant reference state."""
 
     occupied_orbitals: list[int]
     diagonal_energy: float
-    first_active_operator: int
-    first_active_diff: float
+    basis_index: int
 
 
 def clean_pauli_string(pauli_string: tuple[tuple[int, str], ...]) -> tuple[tuple[int, str], ...]:
@@ -61,44 +57,35 @@ def basis_state_to_occupied_orbitals(state: Any, *, n_qubits: int, n_valence_par
     raise ValueError(f"Could not extract occupied orbitals from basis state: {state}")
 
 
-def get_hamiltonian_basis_references(nucleus: Any, *, n_qubits: int, n_valence_particles: int) -> list[tuple[int, ...]]:
-    """Extract all Slater determinants from the Hamiltonian many-body basis."""
-    mbasis = nucleus.get_basis().mb()
-    entries = mbasis.values() if isinstance(mbasis, dict) else mbasis
+def get_hamiltonian_basis_references(nucleus: Any, *, n_qubits: int, n_valence_particles: int,
+                                     orbital_mapping=None) -> list[tuple[int, ...]]:
+    """Return the ordered, preparable determinants of the M-scheme basis.
 
-    tmp: list[tuple[int, ...]] = []
+    Physical labels are mapped explicitly; basis order is retained for comparing
+    with the nuclear matrix and its eigenvectors. No sorting, deduplication or
+    reference-dependent index shifting is performed.
+    """
+    from .orbitals import OrbitalMapping
+    mapping = orbital_mapping or OrbitalMapping.from_nucleus(nucleus)
+    if n_qubits != mapping.n_qubits:
+        raise ValueError("Qubit register does not match the physical orbital space.")
+    basis = nucleus.get_basis().mb()
+    entries = basis.values() if isinstance(basis, dict) else basis
+    references = []
     for state in entries:
-        occupied = tuple(sorted(set(basis_state_to_occupied_orbitals(
-            state,
-            n_qubits=n_qubits,
-            n_valence_particles=n_valence_particles,
-        ))))
+        occupied = mapping.determinant(basis_state_to_occupied_orbitals(
+            state, n_qubits=len(nucleus.get_space().isospin), n_valence_particles=n_valence_particles,
+        ))
         if len(occupied) != n_valence_particles:
-            raise ValueError(f"Basis state {state} gives {len(occupied)} particles, expected {n_valence_particles}.")
-
-        tmp.append(occupied)
-        if not tmp:
-            raise RuntimeError("No Slater determinants found in nucleus.get_basis().mb().")
-
-    all = {q for occupied in tmp for q in occupied}
-
-    if max(all) < n_qubits:
-        # indexes are correct
-        shift = 0
-    else:
-        # we shift the indexes so they are not bigger than nqubits
-        shift = min(all)
-        if max(all) - shift >= n_qubits:
-            raise ValueError(
-                f"Basis indexes ({sorted(all)}) are overflowing the list "
-                f"of size {n_qubits} orbitals after a shift of {shift}. "
-            )
-        LOGGER.info(
-            "Basis indexes shifted %d: %s -> [0,%d] ",
-            shift, sorted(all), n_qubits - 1,
-        )
-
-    references = sorted({tuple(q - shift for q in occupied) for occupied in tmp})
+            raise ValueError("Determinant has the wrong number of valence particles.")
+        target_m = getattr(nucleus, "total_J", None)
+        if target_m is not None and not np.isclose(sum(mapping.twice_m[q] for q in occupied), 2 * target_m):
+            raise ValueError("Determinant is outside the requested M-scheme sector.")
+        references.append(occupied)
+    if not references:
+        raise ValueError("Empty determinant space.")
+    if len(set(references)) != len(references):
+        raise ValueError("The many-body basis contains duplicate determinants.")
     return references
 
 
@@ -165,9 +152,11 @@ class AnsatzBuilder:
 
     def build(self, thetas: list[float] | tuple[float, ...], operator_indices: list[int] | tuple[int, ...]) -> Circuit:
         """Build the ADAPT ansatz circuit from the selected reference determinant."""
-        circuit = Circuit(self.n_qubits)
-        for qubit in self.reference_occupied_orbitals:
-            circuit.add(gates.X(int(qubit)))
+        if len(thetas) != len(operator_indices):
+            raise ValueError("Each ansatz operator requires exactly one parameter.")
+        if any(not 0 <= int(i) < len(self.prepared_generator_term_pool) for i in operator_indices):
+            raise ValueError("Ansatz operator index is outside the pool.")
+        circuit = build_reference_circuit(self.n_qubits, self.reference_occupied_orbitals)
         for theta, index in zip(thetas, operator_indices):
             for term_operator in self.prepared_generator_term_pool[int(index)]:
                 self.backend.exp_pauli_str_staircase(circuit, float(theta), term_operator)
@@ -187,42 +176,28 @@ class AnsatzBuilder:
         return state
 
 
-def build_probe_circuit(n_qubits: int, occupied_orbitals: tuple[int, ...], operator_index: int | None, theta: float | None, *, qubit_generator_pool: list[Any], backend: Any) -> Circuit:
-    """Prepare the reference determinant and optionally apply one ADAPT generator."""
-    circuit = build_reference_circuit(n_qubits, occupied_orbitals)
-    if theta is not None and operator_index is not None:
-        generator = qubit_generator_pool[int(operator_index)]
-        for pauli_string, coefficient in generator.terms.items():
-            if pauli_string == ():
-                continue
-            term_operator = QubitOperator(clean_pauli_string(pauli_string), float(np.real_if_close(coefficient)))
-            backend.exp_pauli_str_staircase(circuit, float(theta), term_operator)
-    return circuit
+def find_reference_from_hamiltonian_basis(problem: ProblemConfig, nucleus: Any, *, n_qubits: int,
+                                         qubit_hamiltonian: Any, orbital_mapping=None,
+                                         shell_diagonal=None) -> ReferenceData:
+    """Select the minimum diagonal-energy determinant, with canonical ties.
 
-
-def find_first_active_operator(occupied_orbitals: tuple[int, ...], *, n_qubits: int, qubit_generator_pool: list[Any], backend: Any, theta_probe: float = 0.1, tol: float = 1e-8) -> tuple[int | None, float]:
-    """Return the first pool operator that changes the reference determinant."""
-    reference_state = build_probe_circuit(n_qubits, occupied_orbitals, None, None, qubit_generator_pool=qubit_generator_pool, backend=backend)().state()
-    for operator_index in range(len(qubit_generator_pool)):
-        test_state = build_probe_circuit(n_qubits, occupied_orbitals, operator_index, theta_probe, qubit_generator_pool=qubit_generator_pool, backend=backend)().state()
-        diff = np.linalg.norm(test_state - reference_state)
-        if diff > tol:
-            return int(operator_index), float(diff)
-    return None, 0.0
-
-
-def find_reference_from_hamiltonian_basis(problem: ProblemConfig, nucleus: Any, *, n_qubits: int, qubit_hamiltonian: Any, qubit_generator_pool: list[Any], backend: Any) -> ReferenceData:
-    """Choose the lowest-energy Slater determinant activated by the ADAPT pool."""
-    n_valence_particles = int(problem.n_valence_protons + problem.n_valence_neutrons)
-    references = get_hamiltonian_basis_references(nucleus, n_qubits=n_qubits, n_valence_particles=n_valence_particles)
-    ranked = sorted((diagonal_energy(occ, qubit_hamiltonian), occ) for occ in references)
-    for energy, occupied_orbitals in ranked:
-        operator_index, diff = find_first_active_operator(
-            occupied_orbitals,
-            n_qubits=n_qubits,
-            qubit_generator_pool=qubit_generator_pool,
-            backend=backend,
-        )
-        if operator_index is not None:
-            return ReferenceData(list(occupied_orbitals), float(energy), int(operator_index), float(diff))
-    raise RuntimeError("No active reference determinant found in the Hamiltonian basis.")
+    The pool is deliberately absent from this interface. A disconnected minimum
+    remains the reference and is handled by the usual ADAPT stopping criteria.
+    """
+    references = get_hamiltonian_basis_references(
+        nucleus, n_qubits=n_qubits,
+        n_valence_particles=problem.n_valence_protons + problem.n_valence_neutrons,
+        orbital_mapping=orbital_mapping,
+    )
+    energies = [diagonal_energy(occupied, qubit_hamiltonian) for occupied in references]
+    if shell_diagonal is not None:
+        diagonal = np.asarray(shell_diagonal)
+        if diagonal.shape != (len(references),) or not np.allclose(diagonal, energies, rtol=1e-9, atol=1e-9):
+            raise ValueError("Mapped determinant energies disagree with the nuclear matrix diagonal.")
+        if np.any(np.imag(diagonal) != 0):
+            raise ValueError("Reference diagonal energies must be real.")
+        energies = np.real(diagonal).tolist()
+    if not np.all(np.isfinite(energies)):
+        raise ValueError("Reference diagonal energies must be finite.")
+    index = min(range(len(references)), key=lambda i: (energies[i], references[i]))
+    return ReferenceData(list(references[index]), float(energies[index]), int(index))

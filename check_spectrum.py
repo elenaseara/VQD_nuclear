@@ -68,11 +68,10 @@ def main() -> int:
     print(f"\n{args.shell}-shell  Z_val={args.protons}  N_val={args.neutrons}  "
           f"J={args.J}")
     print(f"n_qubits = {ctx.hamiltonian.n_qubits}   dimension del modelo = {d}   "
-          f"operadores activos = {len(ctx.active_operator_indices)}")
+          f"operadores del pool base = {len(ctx.base_operator_indices)}")
 
-    # Techo de capas de ADAPT con la politica actual de consumir operadores.
-    print(f"capas maximas de ADAPT = min(max_adapt_iter, {len(ctx.active_operator_indices)})"
-          "   <- los operadores se consumen")
+    print("capas maximas de ADAPT = max_adapt_iter; se permite reutilizacion no consecutiva")
+    print("El parametro J de PyNucShell fija M=J_z (base M-scheme); no proyecta J exacto.")
     if args.n_states > d:
         print(f"\n  AVISO: se piden {args.n_states} estados pero el espacio solo tiene "
               f"{d}. Los sobrantes no existen.")
@@ -152,9 +151,9 @@ def main() -> int:
         print(f"   Sin problema mientras n_states <= {min(i for g in multipletes for i in g)}.")
     else:
         print("   Espectro no degenerado en el rango solicitado.")
-        print("   Un autovalor determina su autovector salvo fase, asi que dos")
-        print("   ejecuciones con la misma energia dan el mismo estado. Se puede")
-        print("   comparar por energia con confianza.")
+        print("   Cada autovalor exacto no degenerado determina un autovector salvo fase.")
+        print("   Dos expectativas de energia parecidas no garantizan el mismo estado;")
+        print("   comprueba tambien las fidelidades y los solapamientos finales.")
 
     if cercanos and any(j < args.n_states for _, j, _ in cercanos):
         print("\n   Ademas hay niveles CASI degenerados entre los solicitados. No")

@@ -31,21 +31,19 @@ def as_clean_string(values: list[Any] | tuple[Any, ...] | None, precision: int =
 
 def serializable_result(result: dict[str, Any]) -> dict[str, Any]:
     """Return a JSON-safe version of one result dictionary."""
-    clean: dict[str, Any] = {}
-    for key, value in result.items():
-        if key == "circuit":
-            continue
-        if isinstance(value, np.ndarray):
-            clean[key] = value.tolist()
-        elif isinstance(value, (np.integer,)):
-            clean[key] = int(value)
-        elif isinstance(value, (np.floating,)):
-            clean[key] = float(value)
-        elif isinstance(value, float) and not np.isfinite(value):
-            clean[key] = None
-        else:
-            clean[key] = value
-    return clean
+    def clean(value):
+        if isinstance(value, dict):
+            return {str(k): clean(v) for k, v in value.items() if k != "circuit"}
+        if isinstance(value, (list, tuple, np.ndarray)):
+            return [clean(v) for v in value]
+        if isinstance(value, np.integer):
+            return int(value)
+        if isinstance(value, (float, np.floating)):
+            return float(value) if np.isfinite(value) else None
+        if isinstance(value, np.bool_):
+            return bool(value)
+        return value
+    return clean(result)
 
 
 def build_summary_dataframe(results: list[dict[str, Any]], label: str, run_id: str) -> pd.DataFrame:
@@ -73,6 +71,16 @@ def build_summary_dataframe(results: list[dict[str, Any]], label: str, run_id: s
             "operators": as_clean_string(result.get("ops", []), precision=0),
             "thetas": as_clean_string(result.get("thetas", []), precision=12),
             "selection_criterion": result.get("selection_criterion", ""),
+            "stop_reason": result.get("stop_reason", ""),
+            "reference_id": result.get("reference_id", ""),
+            "reference_diagonal_energy": result.get("reference_diagonal_energy", np.nan),
+            "pool_size_initial": result.get("pool_size_initial", 0),
+            "pool_size_after_reference": result.get("pool_size_after_reference", 0),
+            "operator_reuse_policy": result.get("operator_reuse_policy", ""),
+            "vqd_objective": result.get("vqd_objective", np.nan),
+            "stop_details": json.dumps(serializable_result(result.get("stop_details", {}))),
+            "exact_state_fidelities": json.dumps(result.get("exact_state_fidelities", [])),
+            "shell_sector_probability": result.get("shell_sector_probability", np.nan),
         })
     return pd.DataFrame(rows)
 
@@ -284,7 +292,12 @@ def write_single_readable_txt_report(path: Path, *, run_id: str, context: "VQDCo
         f"n_qubits: {context.hamiltonian.n_qubits}",
         f"Reference occupied orbitals: {context.reference.occupied_orbitals}",
         f"Reference diagonal energy: {context.reference.diagonal_energy:.12f}",
-        f"First active operator: {context.reference.first_active_operator}",
+        f"Reference basis index: {context.reference.basis_index}",
+        "Reference selection: minimum diagonal energy; canonical occupied-orbital ties",
+        "Reference bitstring (q0 first): " + "".join(
+            "1" if q in context.reference.occupied_orbitals else "0" for q in range(context.hamiltonian.n_qubits)),
+        "Pool: " + json.dumps(context.hamiltonian.pool_metadata),
+        "Operator reuse: allowed except on consecutive iterations",
         f"Beta check: {beta_check.get('message', '')}",
         f"Measurement strategy: {getattr(context.measurements, 'measurement_strategy', 'n/a')}",
         f"Measurement circuits: {getattr(context.measurements, 'measurement_summary', 'n/a (planes diferidos)')}",
@@ -374,10 +387,14 @@ def save_outputs(output: OutputConfig, *, run_id: str, problem: ProblemConfig, r
             "numerical": dataclass_to_dict(numerical),
             "full_limits": dataclass_to_dict(full_limits),
             "beta_check": workflow_output["beta_check"],
+            "reference": {"basis_index": context.reference.basis_index,
+                          "occupied_orbitals": context.reference.occupied_orbitals,
+                          "diagonal_energy": context.reference.diagonal_energy},
+            "pool": context.hamiltonian.pool_metadata,
             "statevector_results": [serializable_result(r) for r in statevector_results],
             "full_quantum_circuit_results": [serializable_result(r) for r in full_quantum_circuit_results],
         }
-        json_path.write_text(json.dumps(raw, indent=2), encoding="utf-8")
+        json_path.write_text(json.dumps(serializable_result(raw), indent=2, allow_nan=False), encoding="utf-8")
 
         diagnostics_rows = []
         for label, group in (("statevector", statevector_results),
