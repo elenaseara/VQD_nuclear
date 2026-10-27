@@ -54,6 +54,8 @@ def build_summary_dataframe(results: list[dict[str, Any]], label: str, run_id: s
             "run_id": run_id,
             "method": label,
             "cost_mode": result.get("cost_mode", ""),
+            "beta_method": result.get("beta_method", "exact"),
+            "beta": float(result.get("beta", 0.0)),
             "state": int(result.get("state_index", len(rows))),
             "exact_energy": float(result.get("exact_energy", np.nan)),
             "computed_energy": float(result.get("energy", np.nan)),
@@ -98,7 +100,7 @@ def build_energy_sorted_dataframe(summary_df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame()
 
     rows: list[dict[str, Any]] = []
-    group_columns = [column for column in ("run_id", "method", "cost_mode") if column in summary_df.columns]
+    group_columns = [column for column in ("run_id", "method", "cost_mode", "beta_method") if column in summary_df.columns]
 
     for group_values, group in summary_df.groupby(group_columns, dropna=False, sort=False):
         if not isinstance(group_values, tuple):
@@ -158,7 +160,7 @@ def build_energy_matched_validation_dataframe(summary_df: pd.DataFrame) -> pd.Da
         raise RuntimeError("scipy is required to build the matched validation summary.") from exc
 
     rows: list[dict[str, Any]] = []
-    group_columns = [column for column in ("run_id", "method", "cost_mode") if column in summary_df.columns]
+    group_columns = [column for column in ("run_id", "method", "cost_mode", "beta_method") if column in summary_df.columns]
 
     for group_values, group in summary_df.groupby(group_columns, dropna=False, sort=False):
         if not isinstance(group_values, tuple):
@@ -211,7 +213,7 @@ def build_energy_matched_validation_dataframe(summary_df: pd.DataFrame) -> pd.Da
     if not rows:
         return pd.DataFrame()
     return pd.DataFrame(rows).sort_values(
-        [column for column in ("run_id", "method", "cost_mode", "matched_exact_state") if column in rows[0]],
+        [column for column in ("run_id", "method", "cost_mode", "beta_method", "matched_exact_state") if column in rows[0]],
         kind="mergesort",
     ).reset_index(drop=True)
 
@@ -224,6 +226,8 @@ def build_history_dataframe(results: list[dict[str, Any]], label: str, run_id: s
             row = dict(record)
             row["run_id"] = run_id
             row["method"] = label
+            row["beta_method"] = result.get("beta_method", "exact")
+            row["beta"] = float(result.get("beta", 0.0))
             row["state"] = state_index
             row["overlaps_with_previous"] = as_clean_string(row.get("overlaps_with_previous", []), precision=8)
             rows.append(row)
@@ -241,6 +245,8 @@ def build_parameters_dataframe(results: list[dict[str, Any]], label: str, run_id
             rows.append({
                 "run_id": run_id,
                 "method": label,
+                "beta_method": result.get("beta_method", "exact"),
+                "beta": float(result.get("beta", 0.0)),
                 "state": state_index,
                 "parameter_index": parameter_index,
                 "operator_index": int(ops[parameter_index]) if parameter_index < len(ops) else np.nan,
@@ -261,7 +267,8 @@ def build_overlap_matrix(context: "VQDContext", results: list[dict[str, Any]]) -
             value = context.measurements.exact_overlap(ri["thetas"], ri["ops"], rj["thetas"], rj["ops"])
             matrix[i, j] = value
             matrix[j, i] = value
-    labels = [f"state_{i}" for i in range(n_results)]
+    labels = [f"{result['beta_method']}_state_{result.get('state_index', i)}"
+              if "beta_method" in result else f"state_{i}" for i, result in enumerate(results)]
     return pd.DataFrame(matrix, index=labels, columns=labels)
 
 
@@ -401,7 +408,9 @@ def save_outputs(output: OutputConfig, *, run_id: str, problem: ProblemConfig, r
                              ("full_quantum_circuit", full_quantum_circuit_results)):
             for result in group:
                 for row in result.get("gradient_diagnostics", []):
-                    diagnostics_rows.append({"run_id": run_id, "method": label, **row})
+                    diagnostics_rows.append({**row, "run_id": run_id, "method": label,
+                                             "beta_method": result.get("beta_method", "exact"),
+                                             "beta": float(result.get("beta", 0.0))})
         diagnostics_df = pd.DataFrame(diagnostics_rows)
         if not diagnostics_df.empty:
             diagnostics_path = results_dir / f"gradient_diagnostics_{run_id}.csv"

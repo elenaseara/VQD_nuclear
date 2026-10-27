@@ -22,7 +22,6 @@ class RunConfig:
     """High-level VQD execution settings."""
 
     n_states: int = 2
-    beta: float | str = "auto"
     run_statevector: bool = True
     run_full_quantum_circuit: bool = False
     n_workers: int | str = "auto"

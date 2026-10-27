@@ -35,16 +35,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--total-j", "--J", dest="total_j", type=int, default=0)
     parser.add_argument("--n-states", type=int, default=2)
     parser.add_argument(
-    "--beta",
-    type=parse_beta,
-    default="auto",
-    help=(
-        "VQD penalty coefficient. 'auto' (default) derives it from the exact "
-        "spectrum as 2*max_i|E_i - E_0|. An explicit value is respected; if it "
-        "is below the largest requested gap you get a warning, not an override."
-    ),
-)
-    parser.add_argument(
         "--mode",
         choices=["statevector_exact", "full_quantum_circuit", "both"],
         default=None,
@@ -173,7 +163,6 @@ def main() -> int:
     )
     run = RunConfig(
         n_states=args.n_states,
-        beta=args.beta,
         run_statevector=run_statevector,
         run_full_quantum_circuit=run_full_quantum_circuit,
         n_workers=args.n_workers,
@@ -219,24 +208,10 @@ def main() -> int:
         workflow_output=workflow_output,
     )
     logging.info("Beta setting: %s", workflow_output["beta_check"].get("message", ""))
-    if workflow_output["beta_check"].get("warning"):
-        logging.warning("%s", workflow_output["beta_check"]["warning"])
     logging.info("Run folder: %s", output.results_dir)
     for name, path in paths.items():
         logging.info("Saved %s: %s", name, path)
     return 0
-
-
-def parse_beta(value: str):
-    if value.strip().lower() == "auto":
-        return "auto"
-    try:
-        beta = float(value)
-    except ValueError:
-        raise argparse.ArgumentTypeError(f"beta must be a number or 'auto', got {value!r}")
-    if beta < 0.0:
-        raise argparse.ArgumentTypeError("beta must be non-negative")
-    return beta
 
 
 if __name__ == "__main__":

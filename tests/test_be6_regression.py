@@ -24,7 +24,6 @@ def test_be6_statevector_regression():
 
     run = RunConfig(
         n_states=1,
-        beta=0.0,
         run_statevector=True,
         run_full_quantum_circuit=False,
         n_workers=1,

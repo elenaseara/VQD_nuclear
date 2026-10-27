@@ -32,3 +32,17 @@ def test_matched_validation_summary_uses_optimal_energy_assignment():
     assert validation.loc[0, "matched_abs_error"] == pytest.approx(0.03)
     assert validation.loc[0, "raw_index_abs_error"] == pytest.approx(4.03)
     assert bool(validation.loc[0, "state_label_changed"]) is True
+
+
+@pytest.mark.parametrize("builder", [build_energy_sorted_dataframe, build_energy_matched_validation_dataframe])
+def test_validation_keeps_beta_variants_separate(builder):
+    summary = pd.DataFrame([
+        {"run_id": "r", "method": "statevector", "cost_mode": "statevector_exact",
+         "beta_method": method, "state": state, "exact_energy": energy, "computed_energy": energy + offset}
+        for method, offset in [("exact", 0.01), ("approximate", 0.02)]
+        for state, energy in enumerate([-5.0, -3.0, -1.0])
+    ])
+    result = builder(summary)
+    assert len(result) == 6
+    for _, group in result.groupby("beta_method"):
+        assert list(group["matched_exact_state"]) == [0, 1, 2]

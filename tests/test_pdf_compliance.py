@@ -282,6 +282,14 @@ def test_he6_three_states_with_pdf_settings_are_reproducible(tmp_path):
                                 energy_improvement_tol=1e-6, new_theta_tol=1e-5, n_jobs=1)
     runs = [vqd.run_workflow(problem, RunConfig(n_states=3, n_workers=1, seed=47433), numerical, FullQuantumLimits())
             for _ in range(2)]
+    for output in runs:
+        results = output["statevector_results"]
+        assert len(results) == 6
+        assert [r["beta_method"] for r in results] == ["exact"] * 3 + ["approximate"] * 3
+        for method in ("exact", "approximate"):
+            family = [r for r in results if r["beta_method"] == method]
+            assert [r["state_index"] for r in family] == [0, 1, 2]
+            assert [r["beta"] for r in family] == pytest.approx(output["beta_check"][method]["betas"])
     for a, b in zip(runs[0]["statevector_results"], runs[1]["statevector_results"]):
         assert a["ops"] == b["ops"]
         assert a["energy"] == pytest.approx(b["energy"], abs=1e-12)
@@ -303,4 +311,6 @@ def test_he6_three_states_with_pdf_settings_are_reproducible(tmp_path):
     raw = json.loads(paths["raw_json"].read_text(encoding="utf-8"), parse_constant=lambda x: pytest.fail(x))
     assert raw["pool"]["reference_filter_applied"] is False
     assert raw["reference"]["occupied_orbitals"] == [0, 3]
+    assert len(raw["statevector_results"]) == 6
+    assert {r["beta_method"] for r in raw["statevector_results"]} == {"exact", "approximate"}
     assert "no_eligible_operators" not in [r["stop_reason"] for r in raw["statevector_results"]]

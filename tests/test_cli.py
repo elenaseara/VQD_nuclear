@@ -1,5 +1,6 @@
 from pathlib import Path
 import importlib.util
+import pytest
 
 
 def load_run_vqd_module():
@@ -67,3 +68,9 @@ def test_pdf_tolerances_and_existing_gradient_default():
     assert args.identity_tol == 1e-9
     assert args.acceptance_tol == 1e-13
     assert args.selection_criterion == "full_vqd"
+
+
+def test_cli_rejects_manual_beta():
+    with pytest.raises(SystemExit) as exc:
+        load_run_vqd_module().build_parser().parse_args(["--beta", "3.0"])
+    assert exc.value.code == 2

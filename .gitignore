@@ -29,6 +29,7 @@ validation_results/
 *.out
 *.err
 nohup.out
+INFORME_VQD.md
 
 # Local/editor files
 .DS_Store

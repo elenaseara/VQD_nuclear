@@ -163,13 +163,17 @@ The largest final squared overlap between distinct states is `8.38e-7`. All acce
 
 ## VQD beta rule
 
-For excited-state calculations with `--n-states >= 2` and `--beta auto`, the code sets the VQD deflation penalty automatically as
+Each selected execution route runs two independent VQD families, with a penalty calculated separately for each target state `i` (ground state is `i=0`):
 
 ```text
-beta = 2 * max_i abs(E_i - E_0)
+beta_exact_i = 2 * abs(E_i - E_0)
+beta_approximate_i = abs(e_i - e_0 + 2 * B)
 ```
-For a single-state run, beta is not used.
-Explicit numeric beta values retain the existing behavior: they are respected and receive a warning if below the largest requested gap.
+`E_i` are exact eigenenergies. `e_i` are the diagonal entries of the many-body Hamiltonian sorted in ascending order, retaining repeated values. `B = max_r sum_(c != r) abs(H_rc)` is the largest absolute off-diagonal row sum. The first excited state uses `e_1`; the second uses `e_2`. Sparse matrices are processed without densifying them.
+
+Only these two automatic rules are supported. Ground-state runs use no penalty. Each family starts from its own ground-state calculation, deflates against its own previous states, and starts with the same seed and numerical settings.
+
+For `N` states, each route returns `N` exact-beta results followed by `N` approximate-beta results. TXT, CSV and JSON outputs record `beta_method` and the beta actually used for each state. Energy matching, sorting and gradient diagnostics distinguish both variants. The local PowerShell launcher compares model-space and full-circuit results separately for each beta variant and execution mode.
 
 ## Outputs
 
