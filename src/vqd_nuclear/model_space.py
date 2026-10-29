@@ -53,6 +53,7 @@ Uso como script (valida contra el camino actual):
 from __future__ import annotations
 
 import logging
+from operator import index as integer_index
 from collections import OrderedDict
 from dataclasses import dataclass
 
@@ -104,24 +105,70 @@ def project_operator(qubit_operator, indices: np.ndarray, n_qubits: int,
     determinante. Si no es ~0, el operador no conserva el subespacio y no se
     puede proyectar.
 
-    Cuesta d aplicaciones del operador. Se paga una vez por operador.
+    Aplica las cadenas directamente a los indices computacionales: no reserva
+    vectores de longitud 2**n_qubits ni llama a apply_operator. Este argumento
+    se conserva para mantener la interfaz de los llamantes existentes.
     """
-    d = int(len(indices))
-    dimension = 2 ** int(n_qubits)
+    try:
+        n_qubits = integer_index(n_qubits)
+    except TypeError as exc:
+        raise ValueError("n_qubits must be a nonnegative integer.") from exc
+    if n_qubits < 0:
+        raise ValueError("n_qubits must be a nonnegative integer.")
+    raw_indices = np.asarray(indices)
+    if raw_indices.ndim != 1:
+        raise ValueError("Model-space indices must be one-dimensional.")
+    try:
+        basis_indices = [integer_index(value) for value in raw_indices]
+    except TypeError as exc:
+        raise ValueError("Model-space indices must be integers.") from exc
+    if any(value < 0 or value >= (1 << n_qubits) for value in basis_indices):
+        raise ValueError("Model-space index is outside the qubit register.")
+    if len(set(basis_indices)) != len(basis_indices):
+        raise ValueError("Model-space indices must not contain duplicates.")
+    positions = {value: row for row, value in enumerate(basis_indices)}
+
+    # Compile masks once. Y contributes i, a sign from the original bit, and
+    # a flip; Z contributes only that sign. Qibo's qubit 0 is the high bit.
+    terms = []
+    for pauli_string, coefficient in qubit_operator.terms.items():
+        coefficient = complex(coefficient)
+        if not np.isfinite(coefficient):
+            raise ValueError("Pauli coefficients must be finite.")
+        flip_mask, sign_mask, n_y = 0, 0, 0
+        for qubit, pauli in pauli_string:
+            try:
+                qubit = integer_index(qubit)
+            except TypeError as exc:
+                raise ValueError("Pauli qubit indices must be integers.") from exc
+            if not 0 <= qubit < n_qubits:
+                raise ValueError("Pauli qubit index is outside the qubit register.")
+            if pauli not in {"I", "X", "Y", "Z"}:
+                raise ValueError(f"Unsupported Pauli operator: {pauli}")
+            mask = 1 << (n_qubits - 1 - qubit)
+            if pauli in {"X", "Y"}:
+                flip_mask ^= mask
+            if pauli in {"Y", "Z"}:
+                sign_mask ^= mask
+            n_y += pauli == "Y"
+        terms.append((flip_mask, sign_mask, coefficient * (1j ** n_y)))
+
+    d = len(basis_indices)
     o_s = np.zeros((d, d), dtype=complex)
-
-    fuera = np.ones(dimension, dtype=bool)
-    fuera[indices] = False
-
     fuga = 0.0
-    vector = np.zeros(dimension, dtype=complex)
-    for b, indice_b in enumerate(indices):
-        vector[:] = 0.0
-        vector[int(indice_b)] = 1.0
-        imagen = apply_operator(qubit_operator, vector, n_qubits)
-        o_s[:, b] = imagen[indices]
-        if fuera.any():
-            fuga = max(fuga, float(np.max(np.abs(imagen[fuera]))))
+    for column, source in enumerate(basis_indices):
+        outside = {}
+        for flip_mask, sign_mask, coefficient in terms:
+            target = source ^ flip_mask
+            amplitude = -coefficient if (source & sign_mask).bit_count() % 2 else coefficient
+            row = positions.get(target)
+            if row is None:
+                outside[target] = outside.get(target, 0.0j) + amplitude
+            else:
+                o_s[row, column] += amplitude
+        # Contributions must cancel before measuring leakage, not afterwards.
+        if outside:
+            fuga = max(fuga, float(max(abs(value) for value in outside.values())))
     return o_s, fuga
 
 

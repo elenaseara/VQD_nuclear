@@ -21,6 +21,7 @@ $ErrorActionPreference = "Stop"
 # ---------------------------------------------------------------------------
 # Configuracion: He6, capa p, 0 protones y 2 neutrones de valencia, M=0.
 # Cada ejecucion compara beta exacta y aproximada por estado.
+# F18 se usa solo para perfilar la inicializacion y todas sus proyecciones.
 # ---------------------------------------------------------------------------
 $NuclearShell = "p"
 $Protons = 0
@@ -41,8 +42,10 @@ $Seed = 47433
 $NJobs = 1
 $NWorkers = 1
 $ResultsDirectory = "validation_local"
+$ComparisonTolerance = 1e-6
 
 if ($FullValidation) {
+    $NStates = 3
     $MaxAdaptIterations = 20
     $OptimizerMaxIterations = 2000
 }
@@ -53,13 +56,22 @@ else {
 
 $RepositoryRoot = $PSScriptRoot
 $EntryPoint = Join-Path -Path $RepositoryRoot -ChildPath "scripts\run_vqd.py"
+$ProfileEntryPoint = Join-Path -Path $RepositoryRoot -ChildPath "scripts\profile_model_space.py"
 $SourcePath = Join-Path -Path $RepositoryRoot -ChildPath "src"
 $OutputRoot = Join-Path -Path $RepositoryRoot -ChildPath $ResultsDirectory
 $Timestamp = Get-Date -Format "yyyyMMdd_HHmmss_fff"
+$ValidationDirectory = Join-Path -Path $OutputRoot -ChildPath "projection_validation_$Timestamp"
+$ProfilePath = Join-Path -Path $ValidationDirectory -ChildPath "projection_f18.json"
+$ComparisonPath = Join-Path -Path $ValidationDirectory -ChildPath "comparison_he6.csv"
+$ValidationSummaryPath = Join-Path -Path $ValidationDirectory -ChildPath "validation_summary.json"
+$PytestBaseTemp = Join-Path -Path $ValidationDirectory -ChildPath "pytest_tmp"
 $InvariantCulture = [System.Globalization.CultureInfo]::InvariantCulture
 
 if (-not (Test-Path -LiteralPath $EntryPoint -PathType Leaf)) {
     throw "Guarda run_pshell.ps1 en la raiz del repositorio VQD_nuclear."
+}
+if (-not (Test-Path -LiteralPath $ProfileEntryPoint -PathType Leaf)) {
+    throw "Falta scripts\profile_model_space.py. Actualiza el repositorio antes de validar."
 }
 if ($EnableGradientDiagnostics -and $GradientMethod -ne "analytic") {
     throw "Los diagnosticos requieren gradient-method analytic."
@@ -88,6 +100,8 @@ if ([string]::IsNullOrWhiteSpace($PythonExecutable)) {
             $PythonCandidates += $PythonCommand.Source
         }
     }
+    # Instalacion local de respaldo cuando no hay un entorno activado.
+    $PythonCandidates += (Join-Path -Path $env:USERPROFILE -ChildPath "anaconda_py\python.exe")
 
     foreach ($Candidate in $PythonCandidates) {
         if (Test-Path -LiteralPath $Candidate -PathType Leaf) {
@@ -121,7 +135,9 @@ Write-Host "Nucleo: He6; estados: $NStates por variante; modo: $SimulationMode"
 Write-Host "Beta exacta: 2*abs(E_i-E_0); aproximada: abs(e_i-e_0+2*B)."
 Write-Host "ADAPT: $MaxAdaptIterations iteraciones; COBYLA: $OptimizerMaxIterations evaluaciones"
 Write-Host "Rutas: model-space y circuito completo"
-Write-Host "Resultados: $OutputRoot"
+Write-Host "Perfilado F18: 24 qubits, espacio fisico de 28 determinantes, todos los generadores"
+Write-Host "Tolerancia de comparacion de energia sin shots: $ComparisonTolerance MeV"
+Write-Host "Validacion: $ValidationDirectory"
 
 # Construir los argumentos sin usar opciones eliminadas (--optimizer-tol,
 # --pool-policy). El flag --no-model-space no recibe ningun valor.
@@ -148,7 +164,7 @@ foreach ($Configuration in $RunConfigurations) {
         "--n-workers", [string]$NWorkers,
         "--qibo-backend", "numpy",
         "--seed", [string]$Seed,
-        "--results-dir", $OutputRoot,
+        "--results-dir", $ValidationDirectory,
         "--run-label", $Configuration.Label
     )
 
@@ -169,10 +185,17 @@ foreach ($Configuration in $RunConfigurations) {
     }
 }
 
+$ProfileArguments = @(
+    $ProfileEntryPoint, "--shell", "sd", "--protons", "1", "--neutrons", "1",
+    "--J", "0", "--all-generators", "--output", $ProfilePath
+)
+
 if ($PreviewOnly) {
     if (-not $SkipTests) {
-        Write-Host "`nTests: python -m pytest -q --basetemp .pytest_local_tmp" -ForegroundColor Cyan
+        Write-Host "`nTests: python -m pytest -q -p no:cacheprovider --basetemp $PytestBaseTemp" -ForegroundColor Cyan
     }
+    Write-Host "`nPerfilado F18:" -ForegroundColor Cyan
+    Write-Host ($PythonExecutable + " " + ($ProfileArguments -join " "))
     foreach ($RunCommand in $RunCommands) {
         Write-Host "`nEjecucion: $($RunCommand.Label)" -ForegroundColor Cyan
         Write-Host ($PythonExecutable + " " + ($RunCommand.Arguments -join " "))
@@ -183,9 +206,11 @@ if ($PreviewOnly) {
 $PreviousPythonPath = $env:PYTHONPATH
 $StartTime = Get-Date
 $ResultsByRun = @()
+$ValidationPassed = $false
 
 Push-Location -LiteralPath $RepositoryRoot
 try {
+    New-Item -ItemType Directory -Path $ValidationDirectory -Force | Out-Null
     $env:PYTHONPATH = $SourcePath
     if (-not [string]::IsNullOrWhiteSpace($PreviousPythonPath)) {
         $env:PYTHONPATH += [System.IO.Path]::PathSeparator + $PreviousPythonPath
@@ -199,14 +224,32 @@ try {
 
     if (-not $SkipTests) {
         Write-Host "`nEjecutando pytest..." -ForegroundColor Cyan
-        # Evitar la carpeta temporal global pytest-of-<otro usuario> en Windows.
-        # --basetemp usa una carpeta dedicada bajo el repositorio.
-        $PytestBaseTemp = Join-Path -Path $RepositoryRoot -ChildPath ".pytest_local_tmp"
-        & $PythonExecutable -m pytest -q --basetemp $PytestBaseTemp
+        # Una carpeta nueva evita borrar resultados antiguos o temporales ajenos.
+        & $PythonExecutable -m pytest -q -p no:cacheprovider --basetemp $PytestBaseTemp
         if ($LASTEXITCODE -ne 0) {
             throw "Pytest ha detectado errores. Se detiene la validacion."
         }
     }
+
+    Write-Host "`nPerfilando F18 sin statevectors completos..." -ForegroundColor Cyan
+    & $PythonExecutable @ProfileArguments
+    if ($LASTEXITCODE -ne 0) {
+        throw "El perfilado de F18 ha fallado."
+    }
+    $Profile = Get-Content -LiteralPath $ProfilePath -Raw | ConvertFrom-Json
+    if (-not $Profile.available -or $Profile.full_state_callback_calls -ne 0 -or
+        $Profile.n_qubits -ne 24 -or $Profile.physical_dimension -ne 28 -or
+        $Profile.pool_size -lt 1 -or $Profile.projected_generators -ne $Profile.pool_size -or
+        @($Profile.generator_projections).Count -ne $Profile.pool_size) {
+        throw "F18 no cumple las condiciones de proyeccion esperadas. Revisa $ProfilePath"
+    }
+    $LeakingGenerators = @($Profile.generator_projections | Where-Object { -not $_.preserves_space })
+    if ($LeakingGenerators.Count -ne 0) {
+        throw "Hay generadores de F18 que no conservan el subespacio fisico. Revisa $ProfilePath"
+    }
+    Write-Host ("F18: motor={0:F3} s; contexto={1:F3} s; generadores={2}; memoria pico={3:F1} MiB" -f
+        $Profile.model_space_seconds, $Profile.build_context_seconds, $Profile.projected_generators,
+        ($Profile.process_peak_bytes / 1MB)) -ForegroundColor Green
 
     foreach ($RunCommand in $RunCommands) {
         $RunLabel = $RunCommand.Label
@@ -217,7 +260,7 @@ try {
             throw "La simulacion $RunLabel ha fallado."
         }
 
-        $RunDirectory = Join-Path -Path $OutputRoot -ChildPath $RunLabel
+        $RunDirectory = Join-Path -Path $ValidationDirectory -ChildPath $RunLabel
         $SummaryPath = Join-Path -Path $RunDirectory -ChildPath "summary_${RunLabel}.csv"
         $JsonPath = Join-Path -Path $RunDirectory -ChildPath "raw_results_${RunLabel}.json"
         $DiagnosticsPath = Join-Path -Path $RunDirectory -ChildPath "gradient_diagnostics_${RunLabel}.csv"
@@ -232,6 +275,12 @@ try {
         $ExpectedRows = 2 * $NStates * $(if ($SimulationMode -eq "both") { 2 } else { 1 })
         if ($Summary.Count -ne $ExpectedRows) {
             throw "Se esperaban $ExpectedRows filas en el resumen de $RunLabel; hay $($Summary.Count)."
+        }
+        foreach ($BetaMethod in @("exact", "approximate")) {
+            $FamilyRows = @($Summary | Where-Object { $_.beta_method -eq $BetaMethod })
+            if ($FamilyRows.Count -ne ($ExpectedRows / 2)) {
+                throw "Falta la familia beta=$BetaMethod en $RunLabel."
+            }
         }
 
         Write-Host "`nResultados: $RunLabel" -ForegroundColor Green
@@ -272,6 +321,11 @@ try {
         $OptimizedEnergy = [double]::Parse($OptimizedRow.computed_energy, $InvariantCulture)
         $FullCircuitEnergy = [double]::Parse($FullCircuitRow.computed_energy, $InvariantCulture)
 
+        $Difference = [math]::Abs($OptimizedEnergy - $FullCircuitEnergy)
+        if ([double]::IsNaN($Difference) -or [double]::IsInfinity($Difference)) {
+            throw "La comparacion contiene energias no finitas."
+        }
+        $DeterministicComparison = $OptimizedRow.method -eq "statevector"
         $Comparison += [pscustomobject]@{
             Method = $OptimizedRow.method
             BetaMethod = $OptimizedRow.beta_method
@@ -279,13 +333,36 @@ try {
             State = $OptimizedRow.state
             Optimized = $OptimizedEnergy
             FullCircuit = $FullCircuitEnergy
-            AbsoluteDifference = [math]::Abs($OptimizedEnergy - $FullCircuitEnergy)
+            AbsoluteDifference = $Difference
+            DeterministicComparison = $DeterministicComparison
+            WithinTolerance = $(if ($DeterministicComparison) { $Difference -le $ComparisonTolerance } else { $null })
         }
     }
 
     Write-Host "`nComparacion de energias:" -ForegroundColor Cyan
     $Comparison | Format-Table -AutoSize | Out-Host
-    Write-Host "Validacion funcional completada. Las diferencias de energia no prueban equivalencia exacta de trayectorias." -ForegroundColor Green
+    $Comparison | Export-Csv -LiteralPath $ComparisonPath -NoTypeInformation -Encoding UTF8
+    $FailedComparisons = @($Comparison | Where-Object { $_.DeterministicComparison -and -not $_.WithinTolerance })
+    $ValidationPassed = $FailedComparisons.Count -eq 0
+    [pscustomobject]@{
+        Passed = $ValidationPassed
+        TestsExecuted = -not [bool]$SkipTests
+        FullValidation = [bool]$FullValidation
+        EnergyToleranceMeV = $ComparisonTolerance
+        F18Profile = $ProfilePath
+        He6Comparison = $ComparisonPath
+        Runs = @($ResultsByRun | ForEach-Object { $_.Label })
+        FailedEnergyComparisons = $FailedComparisons.Count
+        Note = "La comparacion numerica no certifica convergencia fisica. El perfilado incluye seguimiento de memoria."
+    } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $ValidationSummaryPath -Encoding UTF8
+    if (-not $ValidationPassed) {
+        throw "Las energias sin shots difieren por encima de la tolerancia. Revisa $ComparisonPath"
+    }
+    Write-Host "Validacion funcional completada. Las pruebas de proyeccion comprueban tambien matrices, fuga y trayectorias." -ForegroundColor Green
+    if (-not $FullValidation) {
+        Write-Host "El modo rapido limita ADAPT a 3 iteraciones; no certifica convergencia de los excitados."
+    }
+    Write-Host "Resumen: $ValidationSummaryPath"
     Write-Host "Duracion: $((Get-Date) - $StartTime)"
 }
 finally {

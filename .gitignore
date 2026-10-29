@@ -3,6 +3,7 @@ __pycache__/
 *.py[cod]
 *$py.class
 .pytest_cache/
+.pytest_*/
 .ruff_cache/
 .mypy_cache/
 .coverage
@@ -13,6 +14,8 @@ htmlcov/
 venv/
 env/
 ENV/
+.compat_*/
+*.whl
 
 # Build artifacts
 build/
@@ -21,11 +24,10 @@ dist/
 
 # Runtime outputs
 runs/
-.pytest_cache/
-__pycache__/
-*.pyc
 logs/
+validation_local/
 validation_results/
+vqd_results/
 *.out
 *.err
 nohup.out

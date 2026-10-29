@@ -74,7 +74,10 @@ def exact_lowest_energies(nucleus: Any, n_states: int) -> tuple[np.ndarray, np.n
         return np.asarray(values[order], dtype=float), vectors[:, order], matrix
 
     k = min(requested, dim - 1)
-    values, vectors = eigsh(matrix, k=k, which="SA")
+    # ARPACK's implicit random start is independent of the workflow seed in
+    # some SciPy versions. Fix it so repeated reference gaps are reproducible.
+    v0 = np.random.default_rng(0).standard_normal(dim)
+    values, vectors = eigsh(matrix, k=k, which="SA", v0=v0)
     order = np.argsort(values)
     return np.asarray(values[order], dtype=float), vectors[:, order], matrix
 
@@ -82,7 +85,8 @@ def exact_lowest_energies(nucleus: Any, n_states: int) -> tuple[np.ndarray, np.n
 def build_hamiltonian_data(config: ProblemConfig, n_states: int) -> HamiltonianData:
     """Construct all Hamiltonian objects needed by the VQD workflow."""
     nucleus = build_nuclear_hamiltonian(config)
-    exact_energies, exact_vectors, matrix = exact_lowest_energies(nucleus, n_states=max(10, n_states))
+    # Three reference eigenpairs by default; retain enough for larger VQD runs.
+    exact_energies, exact_vectors, matrix = exact_lowest_energies(nucleus, n_states=max(3, n_states))
 
     backend = QiboCircuitBackend()
     encoding = jordan_wigner

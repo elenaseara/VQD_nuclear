@@ -161,7 +161,27 @@ Validation on 2026-10-26: **56 tests passed**, using PyNucShell 0.1.14, Qibo 0.3
 
 The largest final squared overlap between distinct states is `8.38e-7`. All accepted histories satisfy the numerical monotonicity checks, and a repeated run reproduces operator sequences and energies. The remaining second-excited-state error is not reported as convergence: the run reaches its configured iteration limit. The two lower states terminate with the documented stagnation criterion while eligible gradients remain above `grad_tol`; this is distinguishable from gradient convergence. No optimizer tolerances were silently tightened to obtain these results. Local CSV/TXT/JSON evidence is in `validation_results/he6_pdf_revised/` (runtime outputs are ignored by Git).
 
-## VQD beta rule
+## Direct model-space projection
+
+Model-space initialization projects Pauli strings directly onto the ordered
+physical determinants, without allocating statevectors of length `2**n_qubits`.
+Contributions to each external destination are summed before measuring leakage;
+the existing Hermiticity checks and full-state fallback remain in place. The
+same projection is used for the Hamiltonian and lazy generator construction.
+`tests/test_model_space_projection.py` compares it against the original dense
+implementation on small systems and checks ADAPT-VQD trajectories with both beta
+methods. A separate profiling command measures the F18 context and all generators:
+
+```bash
+python scripts/profile_model_space.py --shell sd --protons 1 --neutrons 1 --J 0 --all-generators --output validation_local/projection_f18.json
+```
+
+The JSON records context/projection timings, peak process memory (including
+imports), traced allocations, generator preservation flags and environment
+versions. Timings include memory tracing overhead. Full-state operator calls
+are forbidden during this diagnostic.
+
+## VQD beta formulas
 
 Each selected execution route runs two independent VQD families, with a penalty calculated separately for each target state `i` (ground state is `i=0`):
 

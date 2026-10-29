@@ -283,6 +283,8 @@ def test_he6_three_states_with_pdf_settings_are_reproducible(tmp_path):
     runs = [vqd.run_workflow(problem, RunConfig(n_states=3, n_workers=1, seed=47433), numerical, FullQuantumLimits())
             for _ in range(2)]
     for output in runs:
+        assert len(output["context"].hamiltonian.exact_energies) == 3
+        assert output["context"].hamiltonian.exact_vectors.shape[1] == 3
         results = output["statevector_results"]
         assert len(results) == 6
         assert [r["beta_method"] for r in results] == ["exact"] * 3 + ["approximate"] * 3
@@ -295,7 +297,10 @@ def test_he6_three_states_with_pdf_settings_are_reproducible(tmp_path):
         assert a["energy"] == pytest.approx(b["energy"], abs=1e-12)
         assert a["pool_size_initial"] == a["pool_size_after_reference"] == 8
         assert all(x != y for x, y in zip(a["ops"], a["ops"][1:]))
-        assert sum(a["exact_state_fidelities"]) == pytest.approx(1, abs=1e-9)
+        # Three reference eigenvectors need not span the entire physical sector.
+        assert len(a["exact_state_fidelities"]) == 3
+        assert 0 <= sum(a["exact_state_fidelities"]) <= 1 + 1e-9
+        assert a["shell_sector_probability"] == pytest.approx(1, abs=1e-9)
         assert a["stop_reason"] in {"energy_stagnation", "max_iterations", "gradient_converged"}
         layers = [h for h in a["history"] if h["layer_added"]]
         for i, h in enumerate(layers):
