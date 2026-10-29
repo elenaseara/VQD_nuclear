@@ -41,17 +41,15 @@ nohup.out
 
 # Pruebas varias
 
-check_env.py
-check_jw_block.py
 diagnose_pns.py
 probe_matrix.py
 profile_vqd.py
 provenance.json
 src/vqd_nuclear/measurements_legacy.py
-verify_statevector.py
-validate_model_space.py
-compare_runs.py
-profile_statevector.py
+#verify_statevector.py
+#validate_model_space.py
+#compare_runs.py
+#profile_statevector.py
 projected_energy.py
-check_commutators_dense.py
-check_degeneracy.py
+#check_commutators_dense.py
+#check_degeneracy.py
