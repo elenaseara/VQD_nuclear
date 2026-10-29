@@ -1,3 +1,0 @@
-run_id,method,cost_mode,energy_rank,computed_state,matched_exact_state,exact_energy_sorted,computed_energy_sorted,signed_error_sorted,abs_error_sorted,original_exact_state_for_computed_state,original_exact_energy_for_computed_state,operators,thetas
-he6_optimized_20261026_115043_212,statevector,statevector_exact,0,0,0,-3.048795045453425,-3.048795045453421,3.9968028886505635e-15,3.9968028886505635e-15,0,-3.048795045453425,"[6, 0]","[0.591248170567, -0.785398165196]"
-he6_optimized_20261026_115043_212,statevector,statevector_exact,1,1,1,0.47837522155269924,0.20484465206874142,-0.2735305694839578,0.2735305694839578,1,0.47837522155269924,"[6, 1, 3]","[0.159086329307, 0.597065229088, 0.747540452707]"
