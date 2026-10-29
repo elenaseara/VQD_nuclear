@@ -208,6 +208,14 @@ class ProjectedGenerator:
         fases = np.exp(ANSATZ_DERIVATIVE_PHASE * float(theta) * self.eigenvalues)
         return self.eigenvectors @ (fases * (self.eigenvectors.conj().T @ psi_s))
 
+    def action(self, psi_s: np.ndarray) -> np.ndarray:
+        """Apply the Hermitian generator A_S, without the evolution phase."""
+        return self.eigenvectors @ (self.eigenvalues * (self.eigenvectors.conj().T @ psi_s))
+
+    def effective_generator_action(self, psi_s: np.ndarray) -> np.ndarray:
+        """Derivative at zero of exp(-i theta A_S), with the phase once."""
+        return ANSATZ_DERIVATIVE_PHASE * self.action(psi_s)
+
 
 # =====================================================================
 # 3. El motor proyectado

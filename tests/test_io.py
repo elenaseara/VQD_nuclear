@@ -4,6 +4,30 @@ import pytest
 from vqd_nuclear.io import build_energy_matched_validation_dataframe, build_energy_sorted_dataframe
 
 
+def test_exact_report_does_not_build_sampled_measurement_plan(tmp_path):
+    from types import SimpleNamespace
+    from vqd_nuclear import FullQuantumLimits, NumericalConfig, ProblemConfig, RunConfig
+    from vqd_nuclear.io import write_single_readable_txt_report
+
+    class DeferredMeasurements:
+        measurement_strategy = "paper"
+
+        @property
+        def measurement_summary(self):
+            pytest.fail("Exact reporting constructed a sampled measurement plan")
+
+    context = SimpleNamespace(available_workers=1, measurements=DeferredMeasurements(),
+                              reference=SimpleNamespace(occupied_orbitals=[0], diagonal_energy=0., basis_index=0),
+                              hamiltonian=SimpleNamespace(n_qubits=24, pool_metadata={}, exact_energies=[0.]))
+    output = tmp_path / "report.txt"
+    write_single_readable_txt_report(
+        output, run_id="exact", context=context, beta_check={}, problem=ProblemConfig(),
+        run=RunConfig(n_states=1, run_full_quantum_circuit=False), numerical=NumericalConfig(),
+        full_limits=FullQuantumLimits(), summary_df=pd.DataFrame(), history_df=pd.DataFrame(),
+        parameters_df=pd.DataFrame(), overlap_df=pd.DataFrame())
+    assert "Measurement circuits: n/a (statevector_exact)" in output.read_text(encoding="utf-8")
+
+
 def test_energy_sorted_summary_detects_permuted_states():
     summary = pd.DataFrame([
         {"run_id": "r", "method": "statevector", "cost_mode": "statevector_exact", "state": 0, "exact_energy": -5.0, "computed_energy": -3.0, "operators": "[0]", "thetas": "[0.1]"},

@@ -227,15 +227,19 @@ def test_nonfinite_gradient_is_numerical_error(context, monkeypatch):
     assert "Non-finite" in result["stop_details"]["error"]
 
 
-def test_identity_violation_is_reported_without_adding_layer(context, monkeypatch):
-    original = context.ansatz_builder.state
+@pytest.mark.parametrize("reduced", [True, False])
+def test_identity_violation_is_reported_without_adding_layer(context, monkeypatch, reduced):
+    if not reduced:
+        monkeypatch.setattr(context.measurements, "model_space", None)
+    engine = context.measurements.model_space if reduced else context.ansatz_builder
+    original = engine.state
 
     def state(theta, ops):
         psi = original(theta, ops)
         return -psi if ops else psi
 
     monkeypatch.setattr(context.measurements, "scan_candidate_gradients", fixed_scan)
-    monkeypatch.setattr(context.ansatz_builder, "state", state)
+    monkeypatch.setattr(engine, "state", state)
     result = vqd.run_adapt_vqd(context, n_jobs=1)
     assert result["stop_reason"] == "numerical_error"
     assert result["n_layers"] == 0

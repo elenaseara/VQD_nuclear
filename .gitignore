@@ -28,6 +28,8 @@ logs/
 validation_local/
 validation_results/
 vqd_results/
+beta_results/
+*.log
 *.out
 *.err
 nohup.out
@@ -38,6 +40,9 @@ INFORME_VQD.md
 .vscode/
 .idea/
 *.swp
+.env
+.env.*
+!.env.example
 
 # Notebooks checkpoints
 .ipynb_checkpoints/

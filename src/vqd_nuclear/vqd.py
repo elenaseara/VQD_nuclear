@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 import logging
+from time import perf_counter
 
 import numpy as np
 from scipy.optimize import minimize
@@ -35,6 +36,7 @@ class VQDContext:
     measurements: MeasurementEngine
     base_operator_indices: tuple[int, ...]
     available_workers: int
+    build_context_seconds: float = 0.0
 
     @property
     def active_operator_indices(self) -> list[int]:
@@ -60,6 +62,7 @@ def configure_qibo_backend(backend_name: str = "numpy", seed: int | None = None)
 
 def build_context(problem: ProblemConfig, run: RunConfig, numerical: NumericalConfig, *, qibo_backend: str = "numpy") -> VQDContext:
     """Build the physical Hamiltonian, minimum-diagonal reference and full pool."""
+    started = perf_counter()
     configure_qibo_backend(qibo_backend, seed=run.seed)
     available_workers = detect_hpc_workers() if str(run.n_workers).lower() == "auto" else int(run.n_workers)
     hamiltonian = build_hamiltonian_data(problem, n_states=run.n_states)
@@ -115,6 +118,7 @@ def build_context(problem: ProblemConfig, run: RunConfig, numerical: NumericalCo
         measurements=measurements,
         base_operator_indices=base_operator_indices,
         available_workers=available_workers,
+        build_context_seconds=perf_counter() - started,
     )
 
 
@@ -333,7 +337,14 @@ def exact_state_diagnostics(context, thetas, operator_indices):
         orbital_mapping=data.orbital_mapping,
     )
     indices = model_space_indices(references, data.n_qubits)
-    state = np.asarray(context.ansatz_builder.state(thetas, operator_indices))[indices]
+    ms = context.measurements.model_space
+    if ms is not None and ms.can_handle(operator_indices) and set(indices) == set(ms.indices):
+        # Exact eigenvectors follow the nuclear matrix basis, which may differ
+        # from the order used by ModelSpaceEngine.
+        positions = {int(index): row for row, index in enumerate(ms.indices)}
+        state = ms.state(thetas, operator_indices)[[positions[int(index)] for index in indices]]
+    else:
+        state = np.asarray(context.ansatz_builder.state(thetas, operator_indices))[indices]
     fidelities = np.abs(data.exact_vectors.conj().T @ state) ** 2
     return {"exact_state_fidelities": fidelities.tolist(),
             "best_matching_exact_state": int(np.argmax(fidelities)),
@@ -414,12 +425,16 @@ def run_adapt_vqd(context: VQDContext, *, previous_ansatze: list[dict[str, Any]]
             stop_reason = "no_eligible_operators"
         else:
             try:
+                selection_started = perf_counter()
                 operator_index, gradient, scan = select_next_operator(
                     context, thetas, operator_indices, previous_ansatze, betas,
                     eps=1e-2, max_candidates=max_candidates, n_jobs=workers,
                     overlap_shots=overlap_shots, energy_shots=energy_shots,
                     cost_mode=cost_mode, gradient_method=gradient_method, selection_criterion=selection_criterion,
                 )
+                record["selection_seconds"] = perf_counter() - selection_started
+                if gradient_method == "analytic":
+                    record["gradient_profile"] = dict(context.measurements.last_gradient_profile)
                 scores = selection_scores(scan, selection_criterion)
                 values = np.asarray([scores[mu] for mu in eligible], dtype=float)
                 record.update(selected_operator_id=int(operator_index), selected_operator=int(operator_index),
@@ -434,6 +449,7 @@ def run_adapt_vqd(context: VQDContext, *, previous_ansatze: list[dict[str, Any]]
                 if record["max_abs_gradient"] <= grad_tol:
                     stop_reason = "gradient_converged"
                 else:
+                    extension_started = perf_counter()
                     old_cost, energy_before = float(cost(thetas, operator_indices)), float(energy(thetas, operator_indices))
                     initial_thetas, new_ops = list(thetas) + [0.0], list(operator_indices) + [int(operator_index)]
                     start_cost = float(cost(initial_thetas, new_ops))
@@ -441,24 +457,31 @@ def run_adapt_vqd(context: VQDContext, *, previous_ansatze: list[dict[str, Any]]
                                   initial_thetas=initial_thetas, initial_vqd_cost=start_cost,
                                   zero_parameter_objective_error=start_cost - old_cost)
                     if cost_mode == "statevector_exact":
-                        old_state = context.ansatz_builder.state(thetas, operator_indices)
-                        start_state = context.ansatz_builder.state(initial_thetas, new_ops)
+                        ms = context.measurements.model_space
+                        reduced = (ms is not None and ms.can_handle(operator_indices) and ms.can_handle(new_ops))
+                        state_fn = ms.state if reduced else context.ansatz_builder.state
+                        old_state = state_fn(thetas, operator_indices)
+                        start_state = state_fn(initial_thetas, new_ops)
                         state_error = float(np.linalg.norm(start_state - old_state))
                         record["zero_parameter_state_error"] = state_error
                         if (not np.isfinite(start_cost) or abs(start_cost - old_cost) > identity_tol or
                                 not np.isfinite(state_error) or state_error > identity_tol):
                             raise FloatingPointError("Zero-parameter extension changed the state or VQD objective.")
+                    record["extension_check_seconds"] = perf_counter() - extension_started
                     n_iterations += 1
                     try:
+                        optimizer_started = perf_counter()
                         optimized, objective_value, result = optimize_ansatz(
                             context, initial_thetas, new_ops, previous_ansatze, betas,
                             optimizer_maxiter=optimizer_maxiter, cobyla_rhobeg=cobyla_rhobeg,
                             cobyla_rhoend=cobyla_rhoend, **common,
                         )
+                        record["optimization_seconds"] = perf_counter() - optimizer_started
                     except RuntimeError as exc:
                         stop_reason = "optimizer_failure"
                         record["optimizer_success"], record["optimizer_message"] = False, str(exc)
                     else:
+                        acceptance_started = perf_counter()
                         # Reevaluation uses the same fixed objective as both baselines.
                         checked_cost = float(cost(optimized, new_ops))
                         if not np.isfinite(checked_cost):
@@ -500,6 +523,7 @@ def run_adapt_vqd(context: VQDContext, *, previous_ansatze: list[dict[str, Any]]
                             stop_reason = "optimizer_failure"
                         elif iteration > 0 and stagnant and tiny:
                             stop_reason = "energy_stagnation"
+                        record["acceptance_seconds"] = perf_counter() - acceptance_started
             except (FloatingPointError, np.linalg.LinAlgError) as exc:
                 stop_reason = "numerical_error"
                 record["error"] = str(exc)
@@ -517,7 +541,10 @@ def run_adapt_vqd(context: VQDContext, *, previous_ansatze: list[dict[str, Any]]
     final_energy = float(energy(thetas, operator_indices))
     exact_energy = (float(context.hamiltonian.exact_energies[state_index])
                     if len(context.hamiltonian.exact_energies) > state_index else np.nan)
+    diagnostics_started = perf_counter()
     validation = exact_state_diagnostics(context, thetas, operator_indices) if cost_mode == "statevector_exact" else {}
+    validation["diagnostics_seconds"] = perf_counter() - diagnostics_started
+    validation["build_context_seconds"] = context.build_context_seconds
     return dict(validation, state_index=state_index, energy=final_energy, exact_energy=exact_energy,
                 energy_error=final_energy - exact_energy, abs_energy_error=abs(final_energy - exact_energy),
                 thetas=[float(t) for t in thetas], ops=list(operator_indices), n_iterations=n_iterations,

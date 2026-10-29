@@ -8,6 +8,8 @@ from __future__ import annotations
 from collections import OrderedDict
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
+from time import perf_counter
+import logging
 
 import numpy as np
 from .sampling import (SampledMeasurements, PaperMeasurementPlan, bitstring_to_array,
@@ -19,6 +21,7 @@ if TYPE_CHECKING:
 PauliTerm = tuple[tuple[int, str], ...]
 
 GRADIENT_PHASE = -1j
+LOGGER = logging.getLogger(__name__)
 
 
 def apply_pauli_string_to_state(state: np.ndarray, pauli_string: PauliTerm, n_qubits: int) -> np.ndarray:
@@ -100,6 +103,10 @@ class MeasurementEngine(SampledMeasurements):
         self.qubit_generator_pool = list(qubit_generator_pool or [])
         self.available_workers = int(available_workers)
         self.model_space = model_space
+        self.last_gradient_profile = {}
+
+        # Identity lookup retains canonical IDs, including repeated operators.
+        self._generator_ids = {id(op): mu for mu, op in enumerate(self.qubit_generator_pool)}
 
         if measurement_strategy not in {"paper", "qwc"}:
             raise ValueError("measurement_strategy must be 'paper' or 'qwc'.")
@@ -140,8 +147,32 @@ class MeasurementEngine(SampledMeasurements):
 
     def analytic_vqd_gradient(self, thetas, operator_indices, generator, previous_ansatze=None, betas=None):
         """Compatibility alias forwarding to the existing full VQD gradient."""
+        previous_ansatze = previous_ansatze or []
+        projected = self._reduced_generator(operator_indices, generator)
+        ms = self.model_space
+        if projected is not None and all(ms.can_handle(p["ops"]) for p in previous_ansatze):
+            psi = ms.state(thetas, operator_indices)
+            return self.statevector_vqd_gradient(
+                thetas, operator_indices, generator,
+                [ms.state(p["thetas"], p["ops"]) for p in previous_ansatze], betas or [],
+                psi=psi, h_psi=ms.hamiltonian_s @ psi, a_psi=projected.action(psi),
+            )[2]
         previous_states = [self.ansatz_builder.state(p["thetas"], p["ops"]) for p in (previous_ansatze or [])]
-        return self.statevector_vqd_gradient(thetas, operator_indices, generator, previous_states, betas or [])[2]
+        psi = self.ansatz_builder.state(thetas, operator_indices)
+        return self.statevector_vqd_gradient(thetas, operator_indices, generator, previous_states, betas or [], psi=psi)[2]
+
+    def _reduced_generator(self, operator_indices, generator):
+        """Check both the propagated ansatz and the additional candidate."""
+        ms = self.model_space
+        if ms is None or not ms.can_handle(operator_indices):
+            return None
+        mu = self._generator_ids.get(id(generator))
+        if mu is not None:
+            projected = ms.generator(mu)
+        else:
+            from .model_space import ProjectedGenerator
+            projected = ProjectedGenerator.from_operator(generator, ms.indices, self.n_qubits, None)
+        return projected if projected.preserves_space else None
 
 
 
@@ -197,6 +228,11 @@ class MeasurementEngine(SampledMeasurements):
     def statevector_energy_gradient(self, thetas: list[float], operator_indices: list[int],  generator, *,
                                     psi=None, h_psi=None, a_psi=None):
 
+        if psi is None and h_psi is None and a_psi is None:
+            projected = self._reduced_generator(operator_indices, generator)
+            if projected is not None:
+                psi = self.model_space.state(thetas, operator_indices)
+                return commutator_energy_gradient(self.model_space.hamiltonian_s @ psi, projected.action(psi))
         if psi is None:
             psi = self.ansatz_builder.state(thetas, operator_indices)
         if h_psi is None:
@@ -213,6 +249,16 @@ class MeasurementEngine(SampledMeasurements):
     def statevector_vqd_gradient(self, thetas, operator_indices: list[int], generator, previous_states, betas,
                                  psi=None, h_psi=None, a_psi=None):
 
+        if psi is None and h_psi is None and a_psi is None:
+            projected = self._reduced_generator(operator_indices, generator)
+            # Public raw previous_states use the full computational basis.
+            # Restriction is exact even if a previous state has support outside S:
+            # the current state and its derivative have no such support.
+            if projected is not None and all(np.shape(p) == (1 << self.n_qubits,) for p in previous_states):
+                ms = self.model_space
+                previous_states = [np.asarray(p)[ms.indices] for p in previous_states]
+                psi = ms.state(thetas, operator_indices)
+                h_psi, a_psi = ms.hamiltonian_s @ psi, projected.action(psi)
         if psi is None:
             psi = self.ansatz_builder.state(thetas, operator_indices)
         if h_psi is None:
@@ -257,6 +303,7 @@ class MeasurementEngine(SampledMeasurements):
         """
         previous_ansatze = previous_ansatze or []
         betas = betas or []
+        started = perf_counter()
         if not candidates:
             raise ValueError("No hay candidatos que barrer.")
 
@@ -268,11 +315,19 @@ class MeasurementEngine(SampledMeasurements):
                 "El pool del motor y el de HamiltonianData no coinciden."
             )
     
-        psi = self.ansatz_builder.state(thetas, operator_indices)
-        h_psi = apply_qubit_operator_to_state(self.qubit_hamiltonian, psi, self.n_qubits)
-    
-        previous_states = [self.ansatz_builder.state(p["thetas"], p["ops"])
-                        for p in previous_ansatze]
+        ms = self.model_space
+        use_reduced = (ms is not None and ms.can_handle(operator_indices)
+                       and all(ms.can_handle(p["ops"]) for p in previous_ansatze)
+                       and ms.can_handle(candidates))
+        preparation_started = perf_counter()
+        state_fn = ms.state if use_reduced else self.ansatz_builder.state
+        psi = state_fn(thetas, operator_indices)
+        previous_states = [state_fn(p["thetas"], p["ops"]) for p in previous_ansatze]
+        preparation_seconds = perf_counter() - preparation_started
+        h_started = perf_counter()
+        h_psi = (ms.hamiltonian_s @ psi if use_reduced else
+                 apply_qubit_operator_to_state(self.qubit_hamiltonian, psi, self.n_qubits))
+        h_seconds = perf_counter() - h_started
         
         amplitudes = [np.vdot(prev, psi) for prev in previous_states]
         max_overlap = max((abs(a) for a in amplitudes), default=0.0)
@@ -281,13 +336,27 @@ class MeasurementEngine(SampledMeasurements):
         g_energy: dict[int, float] = {}
         g_penalty: dict[int, float] = {}
         g_total: dict[int, float] = {}
+        penalty_seconds = 0.0
         for mu in candidates:
             generator = self.qubit_generator_pool[int(mu)]
-            a_psi = apply_qubit_operator_to_state(generator, psi, self.n_qubits)
+            a_psi = (ms.generator(int(mu)).action(psi) if use_reduced else
+                     apply_qubit_operator_to_state(generator, psi, self.n_qubits))
+            g_energy[int(mu)] = commutator_energy_gradient(h_psi, a_psi)
+            penalty_started = perf_counter()
+            dpsi = GRADIENT_PHASE * a_psi
+            g_penalty[int(mu)] = float(sum(
+                2.0 * float(beta) * np.real(np.conj(amplitude) * np.vdot(prev, dpsi))
+                for prev, beta, amplitude in zip(previous_states, betas, amplitudes)))
+            penalty_seconds += perf_counter() - penalty_started
+            g_total[int(mu)] = g_energy[int(mu)] + g_penalty[int(mu)]
 
-            g_energy[int(mu)], g_penalty[int(mu)], g_total[int(mu)] = self.statevector_vqd_gradient(thetas, operator_indices, 
-                                                                                                    generator, previous_states, betas,
-                                                                                                    psi=psi, h_psi=h_psi, a_psi=a_psi)
+        self.last_gradient_profile = dict(
+            gradient_backend="model_space" if use_reduced else "full_state",
+            state_dimension=len(psi), candidate_count=len(candidates),
+            preparation_seconds=preparation_seconds, h_action_seconds=h_seconds,
+            penalty_seconds=penalty_seconds, scan_seconds=perf_counter() - started,
+        )
+        LOGGER.info("Gradient scan profile: %s", self.last_gradient_profile)
     
         return CandidateGradientScan(
             candidates=[int(c) for c in candidates],

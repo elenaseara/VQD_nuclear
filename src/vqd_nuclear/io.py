@@ -307,7 +307,9 @@ def write_single_readable_txt_report(path: Path, *, run_id: str, context: "VQDCo
         "Operator reuse: allowed except on consecutive iterations",
         f"Beta check: {beta_check.get('message', '')}",
         f"Measurement strategy: {getattr(context.measurements, 'measurement_strategy', 'n/a')}",
-        f"Measurement circuits: {getattr(context.measurements, 'measurement_summary', 'n/a (planes diferidos)')}",
+        "Measurement circuits: " + str(
+            getattr(context.measurements, "measurement_summary", "n/a")
+            if run.run_full_quantum_circuit else "n/a (statevector_exact)"),
     ]
     add_section("VQD RUN METADATA", "\n".join(metadata_lines))
     add_section("PROBLEM CONFIGURATION", "\n".join(f"{k}: {v}" for k, v in dataclass_to_dict(problem).items()))

@@ -181,6 +181,28 @@ imports), traced allocations, generator preservation flags and environment
 versions. Timings include memory tracing overhead. Full-state operator calls
 are forbidden during this diagnostic.
 
+Analytic ADAPT scans also use the reduced basis when the Hamiltonian, current
+ansatz, previous ansatze and **all candidates** preserve it. A failing check sends
+the entire scan through the full-state route; no candidate is removed. Individual
+exact gradients, zero-parameter extension checks and final fidelities use the
+same reduced representation where applicable. Fidelity diagnostics explicitly
+reorder determinants to the exact eigenvectors' basis. The derivative convention
+is `-1j * A_S @ psi_S`, with the phase applied once.
+
+Each analytic scan records `gradient_profile` in the ADAPT history and logs it:
+backend, state dimension, candidate count, state preparation time, Hamiltonian
+action time, penalty time and total scan time (including lazy projections).
+History also records extension checks, optimization and acceptance times;
+results record context construction and final diagnostics times, in seconds.
+These fields are retained in raw JSON outputs.
+
+`tests/test_model_space_gradients.py` checks energy, penalty and total gradients
+against dense evolution and finite differences, significant penalties with zero
+energy gradient, nonconsecutive reuse, fallback, basis permutation and complete
+small-system ADAPT trajectories for both selection criteria. Full-state calls
+are forbidden during reduced trajectory tests, including optimizer evaluations,
+identity checks and diagnostics.
+
 ## VQD beta formulas
 
 Each selected execution route runs two independent VQD families, with a penalty calculated separately for each target state `i` (ground state is `i=0`):
