@@ -182,9 +182,9 @@ def main() -> int:
         print(f"  FACTOR            : x{t_completo / t_proyectado:.0f}")
 
     ok = peor_energia < 1e-10 and peor_overlap < 1e-10 and peor_estado < 1e-9
-    print("\n  " + ("[OK] Equivalente. Se puede enganchar en MeasurementEngine."
+    print("\n  " + ("[OK] Equivalente.."
                     if ok else
-                    "[FALLO] NO enganchar todavia."))
+                    "[FALLO] NO equivalente."))
     if peor_estado >= 1e-9 and peor_energia < 1e-10:
         print("  El estado difiere pero la energia no: probablemente una fase")
         print("  relativa, no global. Revisa el signo de ANSATZ_DERIVATIVE_PHASE")
