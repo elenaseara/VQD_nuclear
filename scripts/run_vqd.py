@@ -6,8 +6,12 @@ import argparse
 import logging
 import os
 import re
+import sys
 from datetime import datetime
 from pathlib import Path
+
+# Running this entry point must use the checked-out branch, not an older install.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from vqd_nuclear import FullQuantumLimits, NumericalConfig, OutputConfig, ProblemConfig, RunConfig, run_workflow
 
@@ -61,14 +65,22 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-candidates", type=int, default=None,
                         help="Explicit diagnostic cap on candidate IDs; default scans the full physical pool.")
     parser.add_argument("--optimizer-maxiter", type=int, default=1500)
+    parser.add_argument("--max-candidate-attempts", type=int, default=10,
+                        help="Maximum provisional optimizations per accepted ansatz before stopping.")
+    parser.add_argument("--sampled-acceptance-repeats", type=int, default=3,
+                        help="Independent old/candidate cost estimates for sampled acceptance (at least 2).")
+    parser.add_argument("--sampled-acceptance-z", type=float, default=2.0,
+                        help="Required sampled improvement in units of its estimated standard error.")
     parser.add_argument("--cobyla-rhobeg", type=float, default=0.03,
                         help="Radio inicial del simplex de COBYLA.")
     parser.add_argument("--cobyla-rhoend", type=float, default=5e-3,
                         help="Radio final de COBYLA (el 'tol' de SciPy).")
     parser.add_argument("--overlap-shots", type=int, default=200000)
     parser.add_argument("--energy-shots", type=int, default=200000)
-    parser.add_argument("--new-theta-tol", type=float, default=1e-3)
-    parser.add_argument("--energy-improvement-tol", type=float, default=1e-4)
+    parser.add_argument("--new-theta-tol", type=float, default=1e-3,
+                        help="Diagnostic threshold for small accepted new parameters; does not stop ADAPT.")
+    parser.add_argument("--energy-improvement-tol", type=float, default=1e-4,
+                        help="Diagnostic threshold for small accepted objective improvements; does not imply convergence.")
     parser.add_argument("--identity-tol", type=float, default=1e-10,
                         help="Absolute numerical tolerance for zero-layer state/cost identity checks.")
     parser.add_argument("--acceptance-tol", type=float, default=1e-12,
@@ -172,6 +184,9 @@ def main() -> int:
         max_adapt_iter=args.max_adapt_iter,
         grad_tol=args.grad_tol,
         max_candidates=args.max_candidates,
+        max_candidate_attempts=args.max_candidate_attempts,
+        sampled_acceptance_repeats=args.sampled_acceptance_repeats,
+        sampled_acceptance_z=args.sampled_acceptance_z,
         optimizer_maxiter=args.optimizer_maxiter,
         cobyla_rhobeg=args.cobyla_rhobeg,
         cobyla_rhoend=args.cobyla_rhoend,

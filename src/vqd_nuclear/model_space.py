@@ -47,8 +47,9 @@ GUARDAS
 En los dos casos el fallback es el camino completo: una hipotesis incorrecta
 cuesta velocidad, nunca correctitud.
 
-Uso como script (valida contra el camino actual):
-    python model_space.py --shell p --protons 2 --neutrons 0 --J 0
+La equivalencia con el circuito exige ademas que las cadenas de cada generador
+conmuten. Esta condicion se verifica al proyectarlo. La norma reducida detecta
+fallos numericos de propagacion, no sustituye la comprobacion de fuga del operador.
 """
 from __future__ import annotations
 
@@ -56,15 +57,26 @@ import logging
 from operator import index as integer_index
 from collections import OrderedDict
 from dataclasses import dataclass
+from itertools import combinations
 
 import numpy as np
+from .conventions import ANSATZ_DERIVATIVE_PHASE
 
 LOGGER = logging.getLogger(__name__)
 
-# Debe ser la MISMA constante que measurements.py
-ANSATZ_DERIVATIVE_PHASE = -1j
-
 LEAK_TOL = 1e-10
+
+
+class ModelSpaceUnavailable(RuntimeError):
+    """The caller must reevaluate this operation using the full circuit."""
+
+
+def generator_terms_commute(qubit_operator) -> bool:
+    """Check the full Pauli strings, not just their projected blocks."""
+    terms = [dict(term) for term, coefficient in qubit_operator.terms.items() if coefficient != 0]
+    return all(sum(a[q] != b[q] for q in a.keys() & b.keys()
+                   if a[q] != "I" and b[q] != "I") % 2 == 0
+               for a, b in combinations(terms, 2))
 
 
 # =====================================================================
@@ -188,6 +200,7 @@ class ProjectedGenerator:
     eigenvalues: np.ndarray        # (d,) reales
     eigenvectors: np.ndarray       # (d,d) unitaria
     preserves_space: bool
+    circuit_equivalent: bool = True
 
     @classmethod
     def from_operator(cls, qubit_operator, indices, n_qubits, apply_operator,
@@ -201,7 +214,8 @@ class ProjectedGenerator:
             )
         valores, vectores = np.linalg.eigh(t_s)
         return cls(eigenvalues=valores, eigenvectors=vectores,
-                   preserves_space=bool(fuga <= leak_tol))
+                   preserves_space=bool(fuga <= leak_tol),
+                   circuit_equivalent=generator_terms_commute(qubit_operator))
 
     def apply(self, theta: float, psi_s: np.ndarray) -> np.ndarray:
         """exp(PHASE * theta * T_S) |psi_S>, en dos productos matriz-vector."""
@@ -277,13 +291,28 @@ class ModelSpaceEngine:
                     "que lo usen iran por el camino completo. Esto merece "
                     "investigarse: es un hallazgo de fisica, no solo de rendimiento.",
                     mu)
+            if not self._generators[mu].circuit_equivalent:
+                LOGGER.warning(
+                    "Generator %d has noncommuting Pauli terms. Its exponential "
+                    "differs from the circuit product; using the full-state route.", mu)
         return self._generators[mu]
 
     def can_handle(self, operator_indices) -> bool:
         """True si se puede propagar este ansatz dentro del subespacio."""
         if not self.available:
             return False
-        return all(self.generator(mu).preserves_space for mu in operator_indices)
+        return all(self.generator(mu).preserves_space and self.generator(mu).circuit_equivalent
+                   for mu in operator_indices)
+
+    def _checked_state(self, state: np.ndarray) -> np.ndarray:
+        norm_squared = float(np.vdot(state, state).real)
+        if not np.isfinite(norm_squared) or abs(1.0 - norm_squared) > LEAK_TOL:
+            self.available = False
+            self._cache.clear()
+            LOGGER.warning("Reduced-state norm check failed (norm squared=%s); "
+                           "disabling model-space evaluation and using the full circuit.", norm_squared)
+            raise ModelSpaceUnavailable("Reduced-state normalization failed.")
+        return state
 
     @staticmethod
     def _key(thetas, operator_indices, ndigits: int = 12):
@@ -307,16 +336,19 @@ class ModelSpaceEngine:
             raise ValueError("Each model-space operator requires exactly one parameter.")
         if any(not 0 <= int(mu) < len(self.qubit_generator_pool) for mu in operator_indices):
             raise ValueError("Model-space operator index is outside the pool.")
+        if not self.can_handle(operator_indices):
+            raise ModelSpaceUnavailable("This ansatz is not compatible with reduced propagation.")
         key = self._key(thetas, operator_indices)
         cacheado = self._cache.get(key)
         if cacheado is not None:
             self._cache.move_to_end(key)
-            return cacheado
+            return self._checked_state(cacheado)
 
         psi_s = self.reference_s.copy()
         for theta, mu in zip(thetas, operator_indices):
             psi_s = self.generator(int(mu)).apply(float(theta), psi_s)
 
+        self._checked_state(psi_s)
         self._cache_set(key, psi_s)
         return psi_s
 

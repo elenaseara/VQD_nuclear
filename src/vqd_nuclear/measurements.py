@@ -12,6 +12,8 @@ from time import perf_counter
 import logging
 
 import numpy as np
+from .conventions import ANSATZ_DERIVATIVE_PHASE
+from .model_space import ModelSpaceUnavailable
 from .sampling import (SampledMeasurements, PaperMeasurementPlan, bitstring_to_array,
                        group_qubit_wise_commuting_terms, group_measurement_basis)
 
@@ -20,7 +22,7 @@ if TYPE_CHECKING:
 
 PauliTerm = tuple[tuple[int, str], ...]
 
-GRADIENT_PHASE = -1j
+GRADIENT_PHASE = ANSATZ_DERIVATIVE_PHASE
 LOGGER = logging.getLogger(__name__)
 
 
@@ -83,8 +85,8 @@ def qubit_operator_expectation_from_state(operator: Any, state: np.ndarray, n_qu
 def commutator_energy_gradient(h_psi: np.array, a_psi: np.array) -> float:
     """dE/dtheta_mu a partir de H|psi> y A|psi> ya calculados.
 
-    Identidad:  <psi|[H,A]|psi> = 2i Im<H psi|A psi>
-    luego       <psi| i[H,A] |psi> = -2 Im<H psi|A psi>
+    Con U(theta) = exp(-i theta A), dE/dtheta = -i <[H,A]>
+    = 2 Im<H psi|A psi> = 2 Re< H psi | -i A psi >.
     """
     return float(2.0 * np.real(GRADIENT_PHASE * np.vdot(h_psi, a_psi)))
 
@@ -150,11 +152,13 @@ class MeasurementEngine(SampledMeasurements):
         previous_ansatze = previous_ansatze or []
         projected = self._reduced_generator(operator_indices, generator)
         ms = self.model_space
-        if projected is not None and all(ms.can_handle(p["ops"]) for p in previous_ansatze):
-            psi = ms.state(thetas, operator_indices)
+        states = (self.model_space_states((thetas, operator_indices),
+                  *((p["thetas"], p["ops"]) for p in previous_ansatze)) if projected is not None else None)
+        if states is not None:
+            psi, *previous_states = states
             return self.statevector_vqd_gradient(
                 thetas, operator_indices, generator,
-                [ms.state(p["thetas"], p["ops"]) for p in previous_ansatze], betas or [],
+                previous_states, betas or [],
                 psi=psi, h_psi=ms.hamiltonian_s @ psi, a_psi=projected.action(psi),
             )[2]
         previous_states = [self.ansatz_builder.state(p["thetas"], p["ops"]) for p in (previous_ansatze or [])]
@@ -172,7 +176,22 @@ class MeasurementEngine(SampledMeasurements):
         else:
             from .model_space import ProjectedGenerator
             projected = ProjectedGenerator.from_operator(generator, ms.indices, self.n_qubits, None)
-        return projected if projected.preserves_space else None
+        return projected if projected.preserves_space and projected.circuit_equivalent else None
+
+    def model_space_states(self, *ansatze):
+        """Return states in one reduced basis, or None to select the full route.
+
+        A failed norm check invalidates the whole operation, including previously
+        prepared states; callers must not combine full and reduced vectors.
+        """
+        ms = self.model_space
+        if ms is None or not all(ms.can_handle(ops) for _, ops in ansatze):
+            return None
+        try:
+            return [ms.state(theta, ops) for theta, ops in ansatze]
+        except ModelSpaceUnavailable:
+            self._energy_cache.clear()
+            return None
 
 
 
@@ -197,9 +216,10 @@ class MeasurementEngine(SampledMeasurements):
             self._energy_cache.move_to_end(key)
             return self._energy_cache[key]
 
-        if self.model_space is not None and self.model_space.can_handle(operator_indices):
+        states = self.model_space_states((thetas, operator_indices))
+        if states is not None:
             # Camino rapido: propagar y medir dentro del espacio del modelo.
-            energy = self.model_space.energy(thetas, operator_indices)
+            energy = float(np.vdot(states[0], self.model_space.hamiltonian_s @ states[0]).real)
         else:
             state = self.ansatz_builder.state(thetas, operator_indices)
             energy = qubit_operator_expectation_from_state(
@@ -212,10 +232,9 @@ class MeasurementEngine(SampledMeasurements):
     def exact_overlap(self, thetas_i: list[float], ops_i: list[int], thetas_k: list[float], ops_k: list[int]) -> float:
         """Compute |<psi_i|psi_k>|^2 exactly from cached simulator statevectors."""
 
-        if (self.model_space is not None
-                and self.model_space.can_handle(ops_i)
-                and self.model_space.can_handle(ops_k)):
-            return self.model_space.overlap(thetas_i, ops_i, thetas_k, ops_k)
+        states = self.model_space_states((thetas_i, ops_i), (thetas_k, ops_k))
+        if states is not None:
+            return float(abs(np.vdot(states[0], states[1])) ** 2)
 
         psi_i = self.ansatz_builder.state(thetas_i, ops_i)
         psi_k = self.ansatz_builder.state(thetas_k, ops_k)
@@ -230,8 +249,9 @@ class MeasurementEngine(SampledMeasurements):
 
         if psi is None and h_psi is None and a_psi is None:
             projected = self._reduced_generator(operator_indices, generator)
-            if projected is not None:
-                psi = self.model_space.state(thetas, operator_indices)
+            states = self.model_space_states((thetas, operator_indices)) if projected is not None else None
+            if states is not None:
+                psi = states[0]
                 return commutator_energy_gradient(self.model_space.hamiltonian_s @ psi, projected.action(psi))
         if psi is None:
             psi = self.ansatz_builder.state(thetas, operator_indices)
@@ -256,9 +276,11 @@ class MeasurementEngine(SampledMeasurements):
             # the current state and its derivative have no such support.
             if projected is not None and all(np.shape(p) == (1 << self.n_qubits,) for p in previous_states):
                 ms = self.model_space
-                previous_states = [np.asarray(p)[ms.indices] for p in previous_states]
-                psi = ms.state(thetas, operator_indices)
-                h_psi, a_psi = ms.hamiltonian_s @ psi, projected.action(psi)
+                states = self.model_space_states((thetas, operator_indices))
+                if states is not None:
+                    previous_states = [np.asarray(p)[ms.indices] for p in previous_states]
+                    psi = states[0]
+                    h_psi, a_psi = ms.hamiltonian_s @ psi, projected.action(psi)
         if psi is None:
             psi = self.ansatz_builder.state(thetas, operator_indices)
         if h_psi is None:
@@ -294,7 +316,7 @@ class MeasurementEngine(SampledMeasurements):
     *
     """
     def scan_candidate_gradients(self, thetas, operator_indices, candidates,
-                                previous_ansatze=None, betas=None) -> CandidateGradientScan:
+                                previous_ansatze=None, betas=None, *, use_model_space=True) -> CandidateGradientScan:
         """Gradientes de TODOS los candidatos con una sola aplicacion de operador
         por candidato.
     
@@ -316,13 +338,18 @@ class MeasurementEngine(SampledMeasurements):
             )
     
         ms = self.model_space
-        use_reduced = (ms is not None and ms.can_handle(operator_indices)
+        use_reduced = (use_model_space and ms is not None and ms.can_handle(operator_indices)
                        and all(ms.can_handle(p["ops"]) for p in previous_ansatze)
                        and ms.can_handle(candidates))
         preparation_started = perf_counter()
-        state_fn = ms.state if use_reduced else self.ansatz_builder.state
-        psi = state_fn(thetas, operator_indices)
-        previous_states = [state_fn(p["thetas"], p["ops"]) for p in previous_ansatze]
+        states = (self.model_space_states((thetas, operator_indices),
+                  *((p["thetas"], p["ops"]) for p in previous_ansatze)) if use_reduced else None)
+        use_reduced = states is not None
+        if use_reduced:
+            psi, *previous_states = states
+        else:
+            psi = self.ansatz_builder.state(thetas, operator_indices)
+            previous_states = [self.ansatz_builder.state(p["thetas"], p["ops"]) for p in previous_ansatze]
         preparation_seconds = perf_counter() - preparation_started
         h_started = perf_counter()
         h_psi = (ms.hamiltonian_s @ psi if use_reduced else

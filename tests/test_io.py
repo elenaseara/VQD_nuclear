@@ -4,6 +4,19 @@ import pytest
 from vqd_nuclear.io import build_energy_matched_validation_dataframe, build_energy_sorted_dataframe
 
 
+def test_candidate_attempts_table_keeps_rejections_and_acceptance():
+    from vqd_nuclear.io import build_candidate_attempts_dataframe
+    records = [{"state_index": 1, "beta_method": "exact", "beta": 2., "history": [
+        {"iteration": 3, "candidate_attempts": [
+            {"operator_id": 5, "accepted_candidate": False, "layer_added": False},
+            {"operator_id": 7, "accepted_candidate": True, "layer_added": True}]}]}]
+    table = build_candidate_attempts_dataframe(records, "statevector", "run")
+    assert list(table["operator_id"]) == [5, 7]
+    assert list(table["accepted_candidate"]) == [False, True]
+    assert list(table["state"]) == [1, 1]
+    assert list(table["iteration"]) == [3, 3]
+
+
 def test_exact_report_does_not_build_sampled_measurement_plan(tmp_path):
     from types import SimpleNamespace
     from vqd_nuclear import FullQuantumLimits, NumericalConfig, ProblemConfig, RunConfig

@@ -137,6 +137,8 @@ def test_reoptimization_keeps_lowest_cost_and_reevaluates_endpoint(monkeypatch, 
 def test_nonconsecutive_reuse_and_more_layers_than_pool(context, monkeypatch):
     monkeypatch.setattr(context.measurements, "scan_candidate_gradients", fixed_scan)
     monkeypatch.setattr(vqd, "minimize", stationary_optimizer)
+    # A forced selection must still produce a genuine objective improvement.
+    monkeypatch.setattr(vqd, "vqd_cost", lambda context, theta, *args, **kwargs: float(sum(theta)))
     pool = context.base_operator_indices
     result = vqd.run_adapt_vqd(context, max_adapt_iter=10, n_jobs=1, new_theta_tol=0, energy_improvement_tol=0)
     assert result["ops"] == [0, 1] * 5
@@ -203,15 +205,18 @@ def test_stopping_is_explicit_even_without_history(context, monkeypatch, options
     assert result["history"] == []
 
 
-@pytest.mark.parametrize("success,reason", [(True, "energy_stagnation"), (False, "optimizer_failure")])
-def test_stagnation_and_optimizer_failure_are_distinct(context, monkeypatch, success, reason):
+@pytest.mark.parametrize("success", [True, False])
+def test_stationary_optimizer_reports_no_improving_candidate(context, monkeypatch, success):
     def optimizer(objective, x0, **kwargs):
         return OptimizeResult(x=x0.copy(), fun=objective(x0), success=success, message="stuck", nfev=1)
 
     monkeypatch.setattr(context.measurements, "scan_candidate_gradients", fixed_scan)
     monkeypatch.setattr(vqd, "minimize", optimizer)
+    monkeypatch.setattr(vqd, "vqd_cost", lambda *args, **kwargs: 0.)
     result = vqd.run_adapt_vqd(context, n_jobs=1)
-    assert result["stop_reason"] == reason
+    assert result["stop_reason"] == "no_improving_candidate"
+    assert result["n_layers"] == 0
+    assert all(not a["layer_added"] for a in result["history"][-1]["candidate_attempts"])
     assert result["history"][-1]["optimizer_message"] == "stuck"
 
 
@@ -246,14 +251,28 @@ def test_identity_violation_is_reported_without_adding_layer(context, monkeypatc
     assert result["stop_details"]["zero_parameter_state_error"] > 1
 
 
-def test_existing_gradient_matches_actual_circuit_finite_difference(context):
+@pytest.mark.parametrize("step", [1e-3, 1e-4, 1e-5])
+@pytest.mark.parametrize("criterion", ["energy_only", "full_vqd"])
+def test_existing_gradient_matches_actual_circuit_finite_difference(context, step, criterion):
     theta, ops = [0.31, -0.27], [6, 0]
     previous = [{"thetas": [0.23], "ops": [2]}, {"thetas": [-0.4], "ops": [4]}]
     for prev, betas in (([], []), (previous, [9.0, 13.0])):
         scan = context.measurements.scan_candidate_gradients(theta, ops, list(context.base_operator_indices), prev, betas)
         for mu in context.base_operator_indices:
-            _, numeric = vqd.finite_difference_gradient((context, mu, theta, ops, prev, betas, 1e-6, 1, 1, "statevector_exact"))
-            assert scan.g_total[mu] == pytest.approx(numeric, abs=3e-7, rel=2e-6)
+            # Force the FD objective through the actual Qibo circuit as well.
+            ms = context.measurements.model_space
+            context.measurements.clear_cache()
+            context.measurements.model_space = None
+            try:
+                _, numeric = vqd.finite_difference_gradient((context, mu, theta, ops, prev, betas, step, 1, 1,
+                                                             "statevector_exact", criterion))
+            finally:
+                context.measurements.clear_cache()
+                context.measurements.model_space = ms
+            observable_norm = np.linalg.norm(ms.hamiltonian_s, 2) + (sum(betas) if criterion == "full_vqd" else 0)
+            norm = max(abs(ms.generator(mu).eigenvalues))
+            tolerance = step ** 2 * (2 * norm) ** 3 * observable_norm / 6 + 1e-8
+            assert vqd.selection_scores(scan, criterion)[mu] == pytest.approx(numeric, abs=tolerance)
 
 
 @pytest.mark.parametrize("strategy", ["paper", "qwc"])
@@ -305,7 +324,7 @@ def test_he6_three_states_with_pdf_settings_are_reproducible(tmp_path):
         assert len(a["exact_state_fidelities"]) == 3
         assert 0 <= sum(a["exact_state_fidelities"]) <= 1 + 1e-9
         assert a["shell_sector_probability"] == pytest.approx(1, abs=1e-9)
-        assert a["stop_reason"] in {"energy_stagnation", "max_iterations", "gradient_converged"}
+        assert a["stop_reason"] in {"no_improving_candidate", "candidate_attempt_limit", "max_iterations", "gradient_converged"}
         layers = [h for h in a["history"] if h["layer_added"]]
         for i, h in enumerate(layers):
             assert h["vqd_cost_after"] <= h["vqd_cost_before"] + numerical.identity_tol

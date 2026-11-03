@@ -35,6 +35,7 @@ class NumericalConfig:
     max_adapt_iter: int = 20
     grad_tol: float = 5e-4
     max_candidates: int | None = None
+    max_candidate_attempts: int = 10
     optimizer_maxiter: int = 1500
     cobyla_rhobeg: float = 0.03
     cobyla_rhoend: float = 5e-3
@@ -50,6 +51,8 @@ class NumericalConfig:
     use_model_space: bool = True
     identity_tol: float = 1e-10
     acceptance_tol: float = 1e-12
+    sampled_acceptance_repeats: int = 3
+    sampled_acceptance_z: float = 2.0
 
 
 @dataclass(slots=True)

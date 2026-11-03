@@ -18,6 +18,7 @@ from .measurements import MeasurementEngine, apply_qubit_operator_to_state
 from .parallel import parallel_map, resolve_n_jobs
 from .validation import resolve_beta_comparison
 from .model_space import ModelSpaceEngine, model_space_indices
+from .gradient_diagnostics import ranked_candidates
 
 
 LOGGER = logging.getLogger(__name__)
@@ -180,10 +181,15 @@ def vqd_cost(
 
 def finite_difference_gradient(task: tuple[VQDContext, int, list[float], list[int], list[dict[str, Any]], list[float], float, int, int, str]) -> tuple[int, float]:
     """Evaluate one finite-difference gradient candidate as a compatibility fallback."""
-    context, operator_index, thetas, operator_indices, previous_ansatze, betas, eps, overlap_shots, energy_shots, cost_mode = task
+    context, operator_index, thetas, operator_indices, previous_ansatze, betas, eps, overlap_shots, energy_shots, cost_mode = task[:10]
+    criterion = task[10] if len(task) > 10 else "full_vqd"
     trial_indices = operator_indices + [int(operator_index)]
-    cost_plus = vqd_cost(context, thetas + [eps], trial_indices, previous_ansatze, betas, overlap_shots=overlap_shots, energy_shots=energy_shots, cost_mode=cost_mode, n_jobs=1)
-    cost_minus = vqd_cost(context, thetas + [-eps], trial_indices, previous_ansatze, betas, overlap_shots=overlap_shots, energy_shots=energy_shots, cost_mode=cost_mode, n_jobs=1)
+    if criterion == "energy_only":
+        cost_plus = evaluate_energy(context, thetas + [eps], trial_indices, cost_mode=cost_mode, energy_shots=energy_shots, n_jobs=1)
+        cost_minus = evaluate_energy(context, thetas + [-eps], trial_indices, cost_mode=cost_mode, energy_shots=energy_shots, n_jobs=1)
+    else:
+        cost_plus = vqd_cost(context, thetas + [eps], trial_indices, previous_ansatze, betas, overlap_shots=overlap_shots, energy_shots=energy_shots, cost_mode=cost_mode, n_jobs=1)
+        cost_minus = vqd_cost(context, thetas + [-eps], trial_indices, previous_ansatze, betas, overlap_shots=overlap_shots, energy_shots=energy_shots, cost_mode=cost_mode, n_jobs=1)
     return int(operator_index), float((cost_plus - cost_minus) / (2 * eps))
 
 
@@ -219,8 +225,10 @@ def select_next_operator(context: VQDContext, thetas: list[float], operator_indi
         return None, 0.0, None
     
     if gradient_method == "analytic":
+        scan_options = {} if cost_mode == "statevector_exact" else {"use_model_space": False}
         scan = context.measurements.scan_candidate_gradients(
             thetas, operator_indices, candidates, previous_ansatze, betas,
+            **scan_options,
         )
         scores = scan.g_energy if selection_criterion == "energy_only" else scan.g_total
         if selection_criterion not in ("full_vqd", "energy_only"):
@@ -228,25 +236,22 @@ def select_next_operator(context: VQDContext, thetas: list[float], operator_indi
         if not all(np.isfinite(scores[mu]) for mu in scan.candidates):
             raise FloatingPointError("Non-finite candidate gradient.")
 
-        best = max(abs(scores[mu]) for mu in scan.candidates)
-        treshold = best * (1.0 - 1e-9)
-
-        winner = min(mu for mu in scan.candidates if abs(scores[mu]) >= treshold)
-        #winner = max(scan.candidates, key=lambda mu: abs(scores[mu]))
+        winner = ranked_candidates(scan.candidates, scores)[0]
 
         return int(winner), float(scan.g_total[winner]), scan
     
     if gradient_method == "finite_difference":
         tasks = [(context, int(candidate), list(thetas), list(operator_indices),
                   list(previous_ansatze), list(betas), eps,
-                  int(overlap_shots), int(energy_shots), cost_mode)
+                  int(overlap_shots), int(energy_shots), cost_mode, selection_criterion)
                  for candidate in candidates]
         gradients = parallel_map(finite_difference_gradient, tasks,
                                  n_jobs=n_jobs, available_workers=context.available_workers)
         if not all(np.isfinite(value) for _, value in gradients):
             raise FloatingPointError("Non-finite candidate gradient.")
-        best = max(gradients, key=lambda item: abs(item[1]))
-        return int(best[0]), float(best[1]), FiniteDifferenceScan(candidates, dict(gradients))
+        scores = dict(gradients)
+        winner = ranked_candidates(candidates, scores)[0]
+        return int(winner), float(scores[winner]), FiniteDifferenceScan(candidates, scores)
 
     raise ValueError("gradient_method must be 'analytic' or 'finite_difference'.")
 
@@ -254,7 +259,7 @@ def select_next_operator(context: VQDContext, thetas: list[float], operator_indi
 def optimize_ansatz(context: VQDContext, thetas: list[float], operator_indices: list[int],
                     previous_ansatze: list[dict[str, Any]], betas: list[float], *, overlap_shots: int,
                     energy_shots: int, optimizer_maxiter: int, cobyla_rhobeg=0.03, cobyla_rhoend=5e-3,
-                    n_jobs: int | str | None, cost_mode: str):
+                    n_jobs: int | str | None, cost_mode: str, new_parameter_gradient: float | None = None):
     """Optimize every parameter while retaining the lowest evaluated full cost.
 
     In sampled mode this protects measured values, not independently resampled
@@ -290,9 +295,20 @@ def optimize_ansatz(context: VQDContext, thetas: list[float], operator_indices: 
     initial_cost = objective(np.asarray(thetas, dtype=float))
     if not np.isfinite(initial_cost):
         raise FloatingPointError("Non-finite initial VQD objective.")
+    descent_trials = []
+    if thetas and new_parameter_gradient is not None:
+        if not np.isfinite(new_parameter_gradient):
+            raise FloatingPointError("Non-finite new-parameter objective gradient.")
+        if new_parameter_gradient != 0:
+            for step in (0.1, 0.01, 0.001, 0.0001):
+                trial = np.asarray(thetas, dtype=float).copy()
+                trial[-1] -= step * np.sign(new_parameter_gradient)
+                value = float(objective(trial))
+                descent_trials.append(dict(theta=float(trial[-1]), cost=value))
+    optimizer_initial_x = best_x.copy()
     result = minimize(
         objective,
-        np.asarray(thetas, dtype=float),
+        optimizer_initial_x,
         method="COBYLA",
         options={"maxiter": int(optimizer_maxiter), 
                  "rhobeg": float(cobyla_rhobeg), 
@@ -304,6 +320,9 @@ def optimize_ansatz(context: VQDContext, thetas: list[float], operator_indices: 
     result.end_cost = float(objective(result.raw_x))
     result.start_cost = float(objective(np.asarray(thetas, dtype=float)))
     result.initial_cost = float(initial_cost)
+    result.descent_trials = descent_trials
+    result.optimizer_initial_x = optimizer_initial_x
+    result.new_parameter_gradient = new_parameter_gradient
     result.accepted_source = ("initial" if np.array_equal(best_x, thetas) else
                               "optimizer_result" if np.array_equal(best_x, result.raw_x) else "best_evaluated")
     result.x, result.fun = best_x.copy(), float(best_cost)
@@ -338,11 +357,13 @@ def exact_state_diagnostics(context, thetas, operator_indices):
     )
     indices = model_space_indices(references, data.n_qubits)
     ms = context.measurements.model_space
-    if ms is not None and ms.can_handle(operator_indices) and set(indices) == set(ms.indices):
+    states = (context.measurements.model_space_states((thetas, operator_indices))
+              if ms is not None and set(indices) == set(ms.indices) else None)
+    if states is not None:
         # Exact eigenvectors follow the nuclear matrix basis, which may differ
         # from the order used by ModelSpaceEngine.
         positions = {int(index): row for row, index in enumerate(ms.indices)}
-        state = ms.state(thetas, operator_indices)[[positions[int(index)] for index in indices]]
+        state = states[0][[positions[int(index)] for index in indices]]
     else:
         state = np.asarray(context.ansatz_builder.state(thetas, operator_indices))[indices]
     fidelities = np.abs(data.exact_vectors.conj().T @ state) ** 2
@@ -357,13 +378,16 @@ def run_adapt_vqd(context: VQDContext, *, previous_ansatze: list[dict[str, Any]]
                   cobyla_rhoend: float = 5e-3, new_theta_tol: float = 1e-3, energy_improvement_tol: float = 1e-4,
                   cost_mode: str = "statevector_exact", gradient_method: str = "analytic", selection_criterion: str = "full_vqd",
                   collect_gradient_diagnostics: bool = False, store_history: bool = True,
-                  identity_tol: float = 1e-10, acceptance_tol: float = 1e-12) -> dict[str, Any]:
+                  identity_tol: float = 1e-10, acceptance_tol: float = 1e-12,
+                  max_candidate_attempts: int = 10, sampled_acceptance_repeats: int = 3,
+                  sampled_acceptance_z: float = 2.0) -> dict[str, Any]:
     """Run ADAPT with a fixed base pool, safe extension and explicit termination.
 
     The existing gradient formulas and selection modes are preserved. Gradient
     convergence is assessed before extension over all eligible candidates.
-    Stagnation stops only in combination with a small new parameter; either
-    threshold set to zero disables that combined criterion.
+    Extensions are provisional until the full objective improves. One gradient
+    ranking is reused for all candidate attempts at the current accepted state.
+    Stagnation and tiny-parameter thresholds are diagnostic flags only.
     """
     # Copy only the fixed ansatz data, not mutable previous result histories.
     previous_ansatze = [{"thetas": list(p["thetas"]), "ops": list(p["ops"])} for p in (previous_ansatze or [])]
@@ -372,6 +396,12 @@ def run_adapt_vqd(context: VQDContext, *, previous_ansatze: list[dict[str, Any]]
         raise ValueError("One finite, nonnegative beta is required per previous state.")
     if max_adapt_iter < 0 or optimizer_maxiter < 1 or (max_candidates is not None and max_candidates < 0):
         raise ValueError("Invalid iteration/candidate limit.")
+    if int(max_candidate_attempts) != max_candidate_attempts or max_candidate_attempts < 1:
+        raise ValueError("max_candidate_attempts must be a positive integer.")
+    if int(sampled_acceptance_repeats) != sampled_acceptance_repeats or sampled_acceptance_repeats < 2:
+        raise ValueError("sampled_acceptance_repeats must be an integer of at least two.")
+    if not np.isfinite(sampled_acceptance_z) or sampled_acceptance_z < 0:
+        raise ValueError("sampled_acceptance_z must be finite and nonnegative.")
     tolerances = [grad_tol, new_theta_tol, energy_improvement_tol, identity_tol, acceptance_tol]
     if not all(np.isfinite(t) and t >= 0 for t in tolerances):
         raise ValueError("Numerical tolerances must be finite and nonnegative.")
@@ -400,6 +430,9 @@ def run_adapt_vqd(context: VQDContext, *, previous_ansatze: list[dict[str, Any]]
                        candidate_pool_size=len(candidates), pool_cap_applied=max_candidates is not None,
                        objective_mode=cost_mode, selection_criterion=selection_criterion,
                        grad_tol=float(grad_tol), identity_tol=float(identity_tol), acceptance_tol=float(acceptance_tol),
+                       max_candidate_attempts=int(max_candidate_attempts),
+                       sampled_acceptance_repeats=int(sampled_acceptance_repeats),
+                       sampled_acceptance_z=float(sampled_acceptance_z),
                        energy_improvement_tol=float(energy_improvement_tol), new_theta_tol=float(new_theta_tol))
     stop_reason, n_iterations = "max_iterations", 0
     accepted_cost = float(cost(thetas, operator_indices))
@@ -449,81 +482,131 @@ def run_adapt_vqd(context: VQDContext, *, previous_ansatze: list[dict[str, Any]]
                 if record["max_abs_gradient"] <= grad_tol:
                     stop_reason = "gradient_converged"
                 else:
-                    extension_started = perf_counter()
-                    old_cost, energy_before = float(cost(thetas, operator_indices)), float(energy(thetas, operator_indices))
-                    initial_thetas, new_ops = list(thetas) + [0.0], list(operator_indices) + [int(operator_index)]
-                    start_cost = float(cost(initial_thetas, new_ops))
-                    record.update(energy_before=energy_before, vqd_cost_before=old_cost,
-                                  initial_thetas=initial_thetas, initial_vqd_cost=start_cost,
-                                  zero_parameter_objective_error=start_cost - old_cost)
-                    if cost_mode == "statevector_exact":
-                        ms = context.measurements.model_space
-                        reduced = (ms is not None and ms.can_handle(operator_indices) and ms.can_handle(new_ops))
-                        state_fn = ms.state if reduced else context.ansatz_builder.state
-                        old_state = state_fn(thetas, operator_indices)
-                        start_state = state_fn(initial_thetas, new_ops)
-                        state_error = float(np.linalg.norm(start_state - old_state))
-                        record["zero_parameter_state_error"] = state_error
-                        if (not np.isfinite(start_cost) or abs(start_cost - old_cost) > identity_tol or
-                                not np.isfinite(state_error) or state_error > identity_tol):
-                            raise FloatingPointError("Zero-parameter extension changed the state or VQD objective.")
-                    record["extension_check_seconds"] = perf_counter() - extension_started
-                    n_iterations += 1
-                    try:
+                    ranking = ranked_candidates(eligible, scores)
+                    record["gradient_winner_operator_id"] = int(operator_index)
+                    record["candidate_attempts"] = []
+                    old_thetas, old_ops, old_cost = list(thetas), list(operator_indices), float(accepted_cost)
+                    for mu in ranking[:int(max_candidate_attempts)]:
+                        attempt = dict(operator_id=int(mu), accepted_candidate=False, layer_added=False)
+                        record["candidate_attempts"].append(attempt)
+                        record["candidate_attempt_count"] = len(record["candidate_attempts"])
+                        record.update(selected_operator_id=int(mu), selected_operator=int(mu),
+                                      selected_gradient=float(scores[mu]))
+                        extension_started = perf_counter()
+                        initial_thetas, new_ops = old_thetas + [0.0], old_ops + [int(mu)]
+                        start_cost = float(cost(initial_thetas, new_ops))
+                        attempt.update(initial_thetas=initial_thetas, initial_vqd_cost=start_cost,
+                                       zero_parameter_objective_error=start_cost - old_cost)
+                        if cost_mode == "statevector_exact":
+                            states = context.measurements.model_space_states(
+                                (old_thetas, old_ops), (initial_thetas, new_ops))
+                            if states is not None:
+                                old_state, start_state = states
+                            else:
+                                old_state = context.ansatz_builder.state(old_thetas, old_ops)
+                                start_state = context.ansatz_builder.state(initial_thetas, new_ops)
+                            state_error = float(np.linalg.norm(start_state - old_state))
+                            attempt["zero_parameter_state_error"] = state_error
+                            record.update(attempt)
+                            if (not np.isfinite(start_cost) or abs(start_cost - old_cost) > identity_tol or
+                                    not np.isfinite(state_error) or state_error > identity_tol):
+                                raise FloatingPointError("Zero-parameter extension changed the state or VQD objective.")
+                        attempt["extension_check_seconds"] = perf_counter() - extension_started
+                        # Warm starts always follow the gradient of the optimized VQD
+                        # objective, even when the ranking uses energy_only.
+                        if isinstance(scan, FiniteDifferenceScan):
+                            objective_gradient = (scores[mu] if selection_criterion == "full_vqd" else
+                                finite_difference_gradient((context, mu, old_thetas, old_ops,
+                                    previous_ansatze, betas, 1e-4, overlap_shots, energy_shots, cost_mode))[1])
+                        else:
+                            objective_gradient = scan.g_total[mu]
+                        attempt["objective_gradient"] = float(objective_gradient)
+                        record["adapt_gradient"] = float(objective_gradient)
+                        n_iterations += 1
                         optimizer_started = perf_counter()
-                        optimized, objective_value, result = optimize_ansatz(
-                            context, initial_thetas, new_ops, previous_ansatze, betas,
-                            optimizer_maxiter=optimizer_maxiter, cobyla_rhobeg=cobyla_rhobeg,
-                            cobyla_rhoend=cobyla_rhoend, **common,
-                        )
-                        record["optimization_seconds"] = perf_counter() - optimizer_started
-                    except RuntimeError as exc:
-                        stop_reason = "optimizer_failure"
-                        record["optimizer_success"], record["optimizer_message"] = False, str(exc)
-                    else:
-                        acceptance_started = perf_counter()
-                        # Reevaluation uses the same fixed objective as both baselines.
-                        checked_cost = float(cost(optimized, new_ops))
-                        if not np.isfinite(checked_cost):
-                            raise FloatingPointError("Non-finite optimized objective.")
-                        if cost_mode == "statevector_exact" and abs(checked_cost - objective_value) > acceptance_tol:
-                            raise FloatingPointError("Optimizer point and stored objective disagree.")
-                        if checked_cost > start_cost:
-                            optimized, checked_cost = initial_thetas, start_cost
-                            result.accepted_source = "initial"
-                        improvement = float(old_cost - checked_cost)
-                        if cost_mode == "statevector_exact" and checked_cost > accepted_cost + identity_tol + acceptance_tol:
-                            raise FloatingPointError("Accepted VQD objective would increase.")
-                        thetas, operator_indices, accepted_cost = list(optimized), new_ops, checked_cost
-                        physical_energy = float(energy(thetas, operator_indices))
-                        overlaps = compute_previous_overlaps(context, thetas, operator_indices, previous_ansatze,
-                                                           n_jobs=workers, cost_mode=cost_mode, overlap_shots=overlap_shots)
-                        target_energy = (float(context.hamiltonian.exact_energies[state_index])
-                                         if len(context.hamiltonian.exact_energies) > state_index else np.nan)
-                        record.update(layer_added=True, selected_operator_history=list(operator_indices),
-                                      energy_after=physical_energy, physical_energy=physical_energy,
-                                      vqd_cost_after=accepted_cost, vqd_objective=accepted_cost,
-                                      objective_improvement=improvement, thetas=list(thetas), new_theta=float(thetas[-1]),
-                                      n_layers=len(operator_indices), n_parameters=len(thetas),
-                                      optimizer_success=bool(result.success), optimizer_message=str(result.message),
-                                      optimizer_nfev=int(getattr(result, "nfev", -1)),
-                                      optimizer_raw_objective=float(result.raw_fun), optimizer_end_cost=float(result.end_cost),
-                                      optimizer_start_cost=float(result.start_cost), optimizer_raw_thetas=result.raw_x.tolist(),
-                                      accepted_source=result.accepted_source,
-                                      accepted_candidate=result.accepted_source != "initial",
-                                      overlaps_with_previous=[float(x) for x in overlaps],
-                                      exact_target_energy=target_energy, energy_error=physical_energy - target_energy,
-                                      abs_energy_error=abs(physical_energy - target_energy))
-                        stagnant = energy_improvement_tol > 0 and improvement < energy_improvement_tol
-                        tiny = new_theta_tol > 0 and abs(thetas[-1]) < new_theta_tol
-                        record.update(stagnant_objective=bool(stagnant), small_new_theta=bool(tiny))
-                        if not np.isfinite(result.end_cost):
-                            stop_reason = "numerical_error"
-                        elif not result.success and improvement <= acceptance_tol:
+                        try:
+                            optimized, objective_value, result = optimize_ansatz(
+                                context, initial_thetas, new_ops, previous_ansatze, betas,
+                                optimizer_maxiter=optimizer_maxiter, cobyla_rhobeg=cobyla_rhobeg,
+                                cobyla_rhoend=cobyla_rhoend, new_parameter_gradient=objective_gradient, **common)
+                        except RuntimeError as exc:
+                            attempt.update(optimization_seconds=perf_counter() - optimizer_started,
+                                           optimizer_success=False, optimizer_message=str(exc))
+                            record.update(attempt)
                             stop_reason = "optimizer_failure"
-                        elif iteration > 0 and stagnant and tiny:
-                            stop_reason = "energy_stagnation"
-                        record["acceptance_seconds"] = perf_counter() - acceptance_started
+                            break
+                        attempt["optimization_seconds"] = perf_counter() - optimizer_started
+                        acceptance_started = perf_counter()
+                        checked_cost = float(cost(optimized, new_ops))
+                        if not np.isfinite(checked_cost) or not np.isfinite(result.end_cost):
+                            raise FloatingPointError("Non-finite optimized objective.")
+                        if cost_mode == "statevector_exact":
+                            if abs(checked_cost - objective_value) > acceptance_tol:
+                                raise FloatingPointError("Optimizer point and stored objective disagree.")
+                            improvement = float(old_cost - checked_cost)
+                            accepted = improvement > acceptance_tol
+                        else:
+                            # Independent validation estimates avoid accepting the
+                            # lowest noisy optimization sample without confirmation.
+                            baseline_samples = np.array([cost(old_thetas, old_ops)
+                                for _ in range(int(sampled_acceptance_repeats))], dtype=float)
+                            candidate_samples = np.array([cost(optimized, new_ops)
+                                for _ in range(int(sampled_acceptance_repeats))], dtype=float)
+                            if not np.all(np.isfinite(baseline_samples)) or not np.all(np.isfinite(candidate_samples)):
+                                raise FloatingPointError("Non-finite sampled acceptance estimates.")
+                            differences = baseline_samples - candidate_samples
+                            improvement = float(np.mean(differences))
+                            standard_error = float(np.sqrt((np.var(baseline_samples, ddof=1)
+                                + np.var(candidate_samples, ddof=1)) / len(differences)))
+                            checked_cost = float(np.mean(candidate_samples))
+                            accepted = improvement > acceptance_tol + sampled_acceptance_z * standard_error
+                            attempt.update(acceptance_baseline_cost=float(np.mean(baseline_samples)),
+                                           acceptance_standard_error=standard_error,
+                                           acceptance_margin=acceptance_tol + sampled_acceptance_z * standard_error,
+                                           acceptance_baseline_samples=baseline_samples.tolist(),
+                                           acceptance_candidate_samples=candidate_samples.tolist())
+                        unchanged_parameters = np.array_equal(np.asarray(optimized), np.asarray(initial_thetas))
+                        accepted = accepted and not unchanged_parameters
+                        attempt.update(candidate_cost=checked_cost, candidate_improvement=improvement,
+                                       unchanged_parameters=bool(unchanged_parameters),
+                                       candidate_thetas=list(optimized), candidate_new_theta=float(optimized[-1]),
+                                       optimizer_success=bool(result.success), optimizer_message=str(result.message),
+                                       optimizer_nfev=int(getattr(result, "nfev", -1)),
+                                       optimizer_raw_objective=float(result.raw_fun), optimizer_end_cost=float(result.end_cost),
+                                       optimizer_start_cost=float(result.start_cost), optimizer_raw_thetas=result.raw_x.tolist(),
+                                       optimizer_initial_thetas=result.optimizer_initial_x.tolist(),
+                                       descent_trials=result.descent_trials, accepted_source=result.accepted_source)
+                        if accepted:
+                            # Compute diagnostics before committing any part of the
+                            # provisional ansatz, so a failure cannot leave half a layer.
+                            physical_energy = float(energy(optimized, new_ops))
+                            overlaps = compute_previous_overlaps(context, optimized, new_ops, previous_ansatze,
+                                n_jobs=workers, cost_mode=cost_mode, overlap_shots=overlap_shots)
+                            if not np.isfinite(physical_energy) or not np.all(np.isfinite(overlaps)):
+                                raise FloatingPointError("Non-finite candidate energy or overlap.")
+                            thetas, operator_indices, accepted_cost = list(optimized), list(new_ops), checked_cost
+                            target_energy = (float(context.hamiltonian.exact_energies[state_index])
+                                if len(context.hamiltonian.exact_energies) > state_index else np.nan)
+                            attempt.update(layer_added=True, accepted_candidate=True)
+                            record.update(selected_operator_history=list(operator_indices),
+                                          energy_after=physical_energy, physical_energy=physical_energy,
+                                          vqd_cost_after=accepted_cost, vqd_objective=accepted_cost,
+                                          objective_improvement=improvement, thetas=list(thetas), new_theta=float(thetas[-1]),
+                                          n_layers=len(operator_indices), n_parameters=len(thetas),
+                                          overlaps_with_previous=[float(x) for x in overlaps],
+                                          exact_target_energy=target_energy, energy_error=physical_energy - target_energy,
+                                          abs_energy_error=abs(physical_energy - target_energy),
+                                          stagnant_objective=bool(energy_improvement_tol > 0 and improvement < energy_improvement_tol),
+                                          small_new_theta=bool(new_theta_tol > 0 and abs(thetas[-1]) < new_theta_tol))
+                        attempt["acceptance_seconds"] = perf_counter() - acceptance_started
+                        record.update(attempt)
+                        if accepted:
+                            break
+                    if stop_reason == "max_iterations" and not record["accepted_candidate"]:
+                        stop_reason = ("candidate_attempt_limit" if len(record["candidate_attempts"]) < len(ranking)
+                                       else "no_improving_candidate")
+                    for phase in ("extension_check_seconds", "optimization_seconds", "acceptance_seconds"):
+                        record[phase] = sum(attempt.get(phase, 0.0) for attempt in record["candidate_attempts"])
             except (FloatingPointError, np.linalg.LinAlgError) as exc:
                 stop_reason = "numerical_error"
                 record["error"] = str(exc)
@@ -558,6 +641,9 @@ def run_adapt_vqd(context: VQDContext, *, previous_ansatze: list[dict[str, Any]]
                 overlap_shots=int(overlap_shots), energy_shots=int(energy_shots), optimizer_maxiter=int(optimizer_maxiter),
                 cobyla_rhobeg=float(cobyla_rhobeg), cobyla_rhoend=float(cobyla_rhoend),
                 max_adapt_iter=int(max_adapt_iter), max_candidates=max_candidates, grad_tol=float(grad_tol),
+                max_candidate_attempts=int(max_candidate_attempts),
+                sampled_acceptance_repeats=int(sampled_acceptance_repeats),
+                sampled_acceptance_z=float(sampled_acceptance_z),
                 new_theta_tol=float(new_theta_tol), energy_improvement_tol=float(energy_improvement_tol),
                 beta=betas[0] if betas else 0.0, history=history,
                 gradient_diagnostics=[d.as_row() for d in diagnostics])

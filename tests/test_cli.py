@@ -74,3 +74,12 @@ def test_cli_rejects_manual_beta():
     with pytest.raises(SystemExit) as exc:
         load_run_vqd_module().build_parser().parse_args(["--beta", "3.0"])
     assert exc.value.code == 2
+
+
+def test_cli_candidate_retry_and_sampled_acceptance_options():
+    cli = load_run_vqd_module()
+    args = cli.build_parser().parse_args(["--max-candidate-attempts", "7",
+        "--sampled-acceptance-repeats", "5", "--sampled-acceptance-z", "2.5"])
+    assert args.max_candidate_attempts == 7
+    assert args.sampled_acceptance_repeats == 5
+    assert args.sampled_acceptance_z == 2.5

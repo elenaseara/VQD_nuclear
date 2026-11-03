@@ -4,6 +4,21 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
+from math import isfinite
+
+
+def ranked_candidates(candidates, scores) -> list[int]:
+    """Rank absolute gradients, resolving relative 1e-9 ties by canonical ID."""
+    remaining = set(candidates)
+    if any(not isfinite(scores[mu]) for mu in remaining):
+        raise FloatingPointError("Non-finite candidate gradient.")
+    ranked = []
+    while remaining:
+        threshold = max(abs(scores[mu]) for mu in remaining) * (1.0 - 1e-9)
+        tied = sorted(mu for mu in remaining if abs(scores[mu]) >= threshold)
+        ranked.extend(tied)
+        remaining.difference_update(tied)
+    return ranked
 
 
 
@@ -76,8 +91,8 @@ def build_diagnostics(scan, *, state_index: int = -1, iteration: int = -1,
         for mu in candidates
     }
 
-    winner_e = max(candidates, key=lambda m: abs(scan.g_energy[m]))
-    winner_t = max(candidates, key=lambda m: abs(scan.g_total[m]))
+    winner_e = ranked_candidates(candidates, scan.g_energy)[0]
+    winner_t = ranked_candidates(candidates, scan.g_total)[0]
 
     gt_e = abs(scan.g_total[winner_e])
     gt_t = abs(scan.g_total[winner_t])

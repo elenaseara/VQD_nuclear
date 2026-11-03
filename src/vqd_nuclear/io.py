@@ -79,6 +79,7 @@ def build_summary_dataframe(results: list[dict[str, Any]], label: str, run_id: s
             "pool_size_initial": result.get("pool_size_initial", 0),
             "pool_size_after_reference": result.get("pool_size_after_reference", 0),
             "operator_reuse_policy": result.get("operator_reuse_policy", ""),
+            "max_candidate_attempts": result.get("max_candidate_attempts", 10),
             "vqd_objective": result.get("vqd_objective", np.nan),
             "stop_details": json.dumps(serializable_result(result.get("stop_details", {}))),
             "exact_state_fidelities": json.dumps(result.get("exact_state_fidelities", [])),
@@ -256,6 +257,16 @@ def build_parameters_dataframe(results: list[dict[str, Any]], label: str, run_id
     return pd.DataFrame(rows)
 
 
+def build_candidate_attempts_dataframe(results: list[dict[str, Any]], label: str, run_id: str) -> pd.DataFrame:
+    """One row per provisional extension, including rejected candidates."""
+    return pd.DataFrame([
+        dict(attempt, run_id=run_id, method=label, beta_method=result.get("beta_method", "exact"),
+             beta=result.get("beta", 0.0), state=result.get("state_index", 0),
+             iteration=record["iteration"], attempt_index=index)
+        for result in results for record in result.get("history", [])
+        for index, attempt in enumerate(record.get("candidate_attempts", []))])
+
+
 def build_overlap_matrix(context: "VQDContext", results: list[dict[str, Any]]) -> pd.DataFrame:
     """Build exact statevector overlap matrix for final statevector ansatze."""
     n_results = len(results)
@@ -418,6 +429,15 @@ def save_outputs(output: OutputConfig, *, run_id: str, problem: ProblemConfig, r
             diagnostics_path = results_dir / f"gradient_diagnostics_{run_id}.csv"
             diagnostics_df.to_csv(diagnostics_path, index=False)
             paths["gradient_diagnostics_csv"] = diagnostics_path
+
+        attempts_df = pd.concat([
+            build_candidate_attempts_dataframe(statevector_results, "statevector", run_id),
+            build_candidate_attempts_dataframe(full_quantum_circuit_results, "full_quantum_circuit", run_id),
+        ], ignore_index=True)
+        if not attempts_df.empty:
+            attempts_path = results_dir / f"candidate_attempts_{run_id}.csv"
+            attempts_df.to_csv(attempts_path, index=False)
+            paths["candidate_attempts_csv"] = attempts_path
 
         paths.update({
             "summary_csv": summary_path,

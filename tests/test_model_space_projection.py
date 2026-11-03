@@ -7,7 +7,8 @@ import pytest
 from scipy.linalg import expm
 
 from vqd_nuclear.measurements import apply_qubit_operator_to_state, MeasurementEngine
-from vqd_nuclear.model_space import LEAK_TOL, ModelSpaceEngine, ProjectedGenerator, project_operator
+from vqd_nuclear.model_space import (LEAK_TOL, ModelSpaceEngine, ModelSpaceUnavailable,
+                                    ProjectedGenerator, project_operator)
 
 
 def dense_project_operator(operator, indices, n_qubits, apply_operator=apply_qubit_operator_to_state):
@@ -156,6 +157,85 @@ def test_leaking_hamiltonian_and_generator_keep_full_state_fallback():
                                    reference_occupied_orbitals=[], n_qubits=2, apply_operator=None)
     assert not unavailable.available
     assert not unavailable.can_handle([])
+
+
+def test_noncommuting_generator_preserves_space_but_uses_actual_circuit():
+    pytest.importorskip("pynucshell")
+    from pynucshell.operators import QubitOperator
+    from pynucshell.circuit.backends.qibo_backend import QiboCircuitBackend
+    from vqd_nuclear.ansatz import AnsatzBuilder, prepare_generator_term_pool
+
+    generator = QubitOperator(((0, "X"),), 1.0) + QubitOperator(((0, "Z"),), 0.7)
+    h = QubitOperator(((0, "Z"),), 1.0)
+    model = ModelSpaceEngine(qubit_hamiltonian=h, qubit_generator_pool=[generator], indices=[0, 1],
+                             reference_occupied_orbitals=[], n_qubits=1, apply_operator=None)
+    projected = model.generator(0)
+    assert projected.preserves_space
+    assert not projected.circuit_equivalent
+    assert not model.can_handle([0])
+    assert model.can_handle([])
+    with pytest.raises(ModelSpaceUnavailable):
+        model.state([0.4], [0])
+    builder = AnsatzBuilder(n_qubits=1, backend=QiboCircuitBackend(),
+                             prepared_generator_term_pool=prepare_generator_term_pool([generator]),
+                             reference_occupied_orbitals=[])
+    options = dict(ansatz_builder=builder, qubit_hamiltonian=h, qubit_generator_pool=[generator],
+                   n_qubits=1, available_workers=1)
+    reduced = MeasurementEngine(**options, model_space=model)
+    full = MeasurementEngine(**options)
+    assert reduced.statevector_energy([0.4], [0]) == pytest.approx(full.statevector_energy([0.4], [0]))
+    assert reduced.exact_overlap([0.4], [0], [], []) == pytest.approx(full.exact_overlap([0.4], [0], [], []))
+    assert reduced.scan_candidate_gradients([0.4], [0], [0]) == full.scan_candidate_gradients([0.4], [0], [0])
+    assert reduced.last_gradient_profile["gradient_backend"] == "full_state"
+    # The sum exponential actually differs from the Pauli-product circuit.
+    exact_sum_state = projected.apply(0.4, model.reference_s)
+    assert abs(np.vdot(builder.state([0.4], [0]), exact_sum_state)) ** 2 < 1 - 1e-4
+
+
+@pytest.mark.parametrize("cached", [False, True])
+@pytest.mark.parametrize("value", [0.5, np.nan])
+def test_state_normalization_guard_also_checks_cache(cached, value):
+    h = operator({((0, "Z"),): 1})
+    model = ModelSpaceEngine(qubit_hamiltonian=h, qubit_generator_pool=[], indices=[0],
+                             reference_occupied_orbitals=[], n_qubits=1, apply_operator=None)
+    if cached:
+        model.state([], [])[0] = value
+    else:
+        model.reference_s[0] = value
+    with pytest.raises(ModelSpaceUnavailable, match="normalization"):
+        model.state([], [])
+    assert not model.available
+    assert not model._cache
+
+
+@pytest.mark.parametrize("protons,neutrons", [(2, 0), (0, 2), (1, 1)])
+def test_random_ansatze_match_circuit_states_energies_and_overlaps(protons, neutrons):
+    pytest.importorskip("pynucshell")
+    from vqd_nuclear import NumericalConfig, ProblemConfig, RunConfig, vqd
+    from vqd_nuclear.measurements import qubit_operator_expectation_from_state
+
+    context = vqd.build_context(ProblemConfig(shell="p", n_valence_protons=protons, n_valence_neutrons=neutrons),
+                                RunConfig(n_states=3, n_workers=1), NumericalConfig(n_jobs=1))
+    ms = context.measurements.model_space
+    assert ms.can_handle(context.base_operator_indices)
+    np.testing.assert_allclose(np.linalg.eigvalsh(ms.hamiltonian_s)[:3],
+                               context.hamiltonian.exact_energies, atol=1e-10)
+    rng = np.random.default_rng(1304)
+    ansatze = []
+    for depth in range(1, 5):
+        theta = rng.uniform(-0.8, 0.8, depth).tolist()
+        ops = rng.choice(context.base_operator_indices, size=depth).tolist()
+        reduced = ms.state(theta, ops)
+        full = np.asarray(context.ansatz_builder.state(theta, ops))
+        phase = np.vdot(reduced, full[ms.indices])
+        np.testing.assert_allclose(full[ms.indices], phase / abs(phase) * reduced, atol=1e-10)
+        assert np.vdot(full[ms.indices], full[ms.indices]).real == pytest.approx(1, abs=1e-10)
+        assert ms.energy(theta, ops) == pytest.approx(
+            qubit_operator_expectation_from_state(context.hamiltonian.qubit_hamiltonian, full, ms.n_qubits),
+            abs=1e-10)
+        ansatze.append((theta, ops, full))
+    for a, b in combinations(ansatze, 2):
+        assert ms.overlap(a[0], a[1], b[0], b[1]) == pytest.approx(abs(np.vdot(a[2], b[2])) ** 2, abs=1e-10)
 
 
 def test_nuclear_hamiltonian_generators_and_pauli_commutation():
