@@ -9,14 +9,18 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from .conventions import ANSATZ_DERIVATIVE_PHASE
+from .measurement_plan import (build_energy_measurement_plan,
+                               build_gradient_measurement_plan, build_qwc_plan)
+from .pauli_algebra import build_gradient_operator
+from . import sampling
+
 import numpy as np
 
 if TYPE_CHECKING:
     from .ansatz import AnsatzBuilder
 
 PauliTerm = tuple[tuple[int, str], ...]
-
-GRADIENT_PHASE = -1j
 
 
 def apply_pauli_string_to_state(state: np.ndarray, pauli_string: PauliTerm, n_qubits: int) -> np.ndarray:
@@ -81,7 +85,7 @@ def commutator_energy_gradient(h_psi: np.array, a_psi: np.array) -> float:
     Identidad:  <psi|[H,A]|psi> = 2i Im<H psi|A psi>
     luego       <psi| i[H,A] |psi> = -2 Im<H psi|A psi>
     """
-    return float(2.0 * np.real(GRADIENT_PHASE * np.vdot(h_psi, a_psi)))
+    return float(2.0 * np.real(ANSATZ_DERIVATIVE_PHASE * np.vdot(h_psi, a_psi)))
 
 
 class MeasurementEngine:
@@ -91,25 +95,29 @@ class MeasurementEngine:
     *
     """
     def __init__(self, *, ansatz_builder: "AnsatzBuilder", qubit_hamiltonian: Any,
-                 n_qubits: int, available_workers: int, qubit_generator_pool=None, measurement_strategy: str = "paper", model_space=None) -> None:
+                 n_qubits: int, available_workers: int, qubit_generator_pool=None, measurement_strategy: str = "paper", model_space=None,
+                 compression_fallback: bool = False) -> None:
         self.ansatz_builder = ansatz_builder
         self.qubit_hamiltonian = qubit_hamiltonian
         self.n_qubits = int(n_qubits)
-        self.qubit_generator_pool = list(qubit_generator_pool) or []
+        # OJO: list(None) lanza TypeError; el "or []" tiene que ir DENTRO.
+        self.qubit_generator_pool = list(qubit_generator_pool or [])
         self.model_space = model_space
 
         if measurement_strategy not in {"paper", "qwc"}:
             raise ValueError("measurement_strategy must be 'paper' or 'qwc'.")
         self.measurement_strategy = str(measurement_strategy)
+        # Solo afecta a la estrategia "paper". No esta en el pseudocodigo.
+        self.compression_fallback = bool(compression_fallback)
 
         self._energy_cache: OrderedDict[tuple[tuple[float, ...], tuple[int, ...]], float] = OrderedDict()
         self.max_energy_cache_items = 128
 
-        # planes perezosos: la ruta statevector no construye ninguno
-        self._paper_plan_cache = None
-        self._qwc_groups_cache = None
+        # Planes perezosos: la ruta statevector no construye ninguno.
+        self._energy_plan_cache = None
 
-        # fase 2: G_mu y su plan, cacheados por indice de candidato
+        # G_mu y su plan, cacheados por indice de candidato: solo dependen de
+        # H y de A_mu, no del estado, asi que se construyen una vez por ejecucion.
         self._gradient_operators = {}
         self._gradient_plans = {}
 
@@ -193,7 +201,7 @@ class MeasurementEngine:
         g_energy = self.statevector_energy_gradient(
             thetas, operator_indices, generator, psi=psi, h_psi=h_psi, a_psi=a_psi)
 
-        dpsi = GRADIENT_PHASE * a_psi
+        dpsi = ANSATZ_DERIVATIVE_PHASE * a_psi
         g_penalty = 0.0
 
         for prev_psi, beta in zip(previous_states, betas):
@@ -204,6 +212,103 @@ class MeasurementEngine:
         g_total = g_energy + g_penalty
 
         return g_energy, g_penalty, g_total
+
+
+    ####################################################################################
+    ##########################   RUTA MUESTREADA (FASE D)   ############################
+    ####################################################################################
+
+    # -- planes (fase C), perezosos y cacheados ---------------------------------------
+
+    def _plan_for(self, operator, *, gradient: bool):
+        if self.measurement_strategy == "qwc":
+            return build_qwc_plan(operator)
+        if gradient:
+            return build_gradient_measurement_plan(
+                operator, compression_fallback=self.compression_fallback)
+        return build_energy_measurement_plan(
+            operator, compression_fallback=self.compression_fallback)
+
+    @property
+    def energy_plan(self):
+        """Plan de medida de H. Se construye la primera vez que se pide."""
+        if self._energy_plan_cache is None:
+            self._energy_plan_cache = self._plan_for(self.qubit_hamiltonian, gradient=False)
+        return self._energy_plan_cache
+
+    @property
+    def measurement_summary(self) -> dict[str, int]:
+        """Circuitos por tipo en el plan de la energia (lo usa io.py)."""
+        return self.energy_plan.summary()
+
+    def gradient_operator(self, mu: int):
+        """G_mu = PHASE [H, A_mu] (fase B), cacheado por candidato."""
+        mu = int(mu)
+        if mu not in self._gradient_operators:
+            self._gradient_operators[mu] = build_gradient_operator(
+                self.qubit_hamiltonian, self.qubit_generator_pool[mu])
+        return self._gradient_operators[mu]
+
+    def gradient_plan(self, mu: int):
+        """Plan de medida de G_mu (fase C), cacheado por candidato."""
+        mu = int(mu)
+        if mu not in self._gradient_plans:
+            self._gradient_plans[mu] = self._plan_for(self.gradient_operator(mu), gradient=True)
+        return self._gradient_plans[mu]
+
+    # -- estimadores con shots ------------------------------------------------------
+
+    def sampled_energy(self, thetas: list[float], operator_indices: list[int], *,
+                       nshots: int, n_jobs=None) -> float:
+        """<psi(theta)|H|psi(theta)> con shots. `nshots` es por circuito.
+
+        `n_jobs` se acepta por compatibilidad con vqd.py y se ignora.
+        """
+        del n_jobs
+        base = self.ansatz_builder.build(thetas, operator_indices)
+        return sampling.sampled_expectation(self.energy_plan, base, int(nshots))
+
+    def sampled_energy_gradient(self, thetas: list[float], operator_indices: list[int],
+                                mu: int, *, nshots: int, base_circuit=None) -> float:
+        """g^E_mu = <psi|G_mu|psi> con shots (seccion 14).
+
+        Mismo numero y mismo signo que statevector_energy_gradient cuando
+        nshots -> inf (bloque 5 de test_pauli_algebra + fase C).
+        """
+        if base_circuit is None:
+            base_circuit = self.ansatz_builder.build(thetas, operator_indices)
+        return sampling.sampled_expectation(self.gradient_plan(mu), base_circuit, int(nshots))
+
+    def sampled_candidate_scan(self, thetas, operator_indices, candidates, *,
+                               nshots: int) -> "CandidateGradientScan":
+        """Barrido de candidatos en la ruta muestreada.
+
+        Frontera honesta: g_penalty NO es medible como valor esperado de un
+        observable (requiere un test de Hadamard entre dos estados), asi que la
+        ruta muestreada selecciona con g^E solo. Se devuelve g_total = g_energy
+        y g_penalty / max_overlap_amplitude como NaN ("no medido", no "cero").
+        """
+        if not candidates:
+            raise ValueError("No hay candidatos que barrer.")
+        base = self.ansatz_builder.build(thetas, operator_indices)
+        g_energy = {int(mu): self.sampled_energy_gradient(thetas, operator_indices, int(mu),
+                                                          nshots=nshots, base_circuit=base)
+                    for mu in candidates}
+        return CandidateGradientScan(
+            candidates=[int(c) for c in candidates],
+            g_energy=g_energy,
+            g_penalty={mu: float("nan") for mu in g_energy},
+            g_total=dict(g_energy),
+            max_overlap_amplitude=float("nan"),
+        )
+
+    def destructive_swap_overlap(self, thetas_i: list[float], ops_i: list[int],
+                                 thetas_k: list[float], ops_k: list[int], *, nshots: int) -> float:
+        """|<psi_i|psi_k>|^2 con el SWAP destructivo (seccion 16.2, fase E)."""
+        return sampling.destructive_swap_overlap(
+            self.ansatz_builder.build(thetas_i, ops_i),
+            self.ansatz_builder.build(thetas_k, ops_k),
+            self.n_qubits, int(nshots))
 
 
 

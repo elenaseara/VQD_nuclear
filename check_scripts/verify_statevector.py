@@ -77,7 +77,7 @@ def main() -> int:
     # =================================================================
     seccion("1. CONVENCION DE FASE CONTRA EL CIRCUITO REAL  (comprobacion 0.2)")
     # =================================================================
-    print(f"  GRADIENT_PHASE declarada = {M.GRADIENT_PHASE}")
+    print(f"  ANSATZ_DERIVATIVE_PHASE declarada = {M.ANSATZ_DERIVATIVE_PHASE}")
     print("  Deriva la energia del CIRCUITO REAL respecto de theta y la compara")
     print("  con el gradiente analitico en theta=0.\n")
 
@@ -113,7 +113,7 @@ def main() -> int:
               f"coincide con la derivada del circuito")
         if not np.isclose(medio, 1.0, atol=2e-3):
             print("\n  INTERPRETACION DEL COCIENTE:")
-            print("    -1.0        -> cambia el signo de GRADIENT_PHASE (+1j <-> -1j)")
+            print("    -1.0        -> cambia el signo de ANSATZ_DERIVATIVE_PHASE (+1j <-> -1j)")
             print("    +2.0 / -2.0 -> exp_pauli_str_staircase usa Rz = e^{-i theta Z/2};")
             print("                   multiplica la fase por 0.5 (o divide el gradiente por 2)")
             print("    +0.5 / -0.5 -> el factor 1/2 va al reves")

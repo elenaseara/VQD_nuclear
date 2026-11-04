@@ -56,12 +56,12 @@ import logging
 from collections import OrderedDict
 from dataclasses import dataclass
 
+from .conventions import ANSATZ_DERIVATIVE_PHASE
+
+
 import numpy as np
 
 LOGGER = logging.getLogger(__name__)
-
-# Debe ser la MISMA constante que measurements.py
-ANSATZ_DERIVATIVE_PHASE = -1j
 
 LEAK_TOL = 1e-10
 

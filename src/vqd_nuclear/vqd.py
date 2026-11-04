@@ -213,9 +213,13 @@ def select_next_operator(context: VQDContext, thetas: list[float], operator_indi
         return None, 0.0, None
     
     if gradient_method == "analytic":
-        scan = context.measurements.scan_candidate_gradients(
-            thetas, operator_indices, candidates, previous_ansatze, betas,
-        )
+        if cost_mode == "full_quantum_circuit":
+            scan = context.measurements.sampled_candidate_scan(
+                thetas, operator_indices, candidates, nshots=energy_shots)
+        else:
+            scan = context.measurements.scan_candidate_gradients(
+                thetas, operator_indices, candidates, previous_ansatze, betas,
+                )
         scores = scan.g_energy if selection_criterion == "energy_only" else scan.g_total
         if selection_criterion not in ("full_vqd", "energy_only"):
             raise ValueError("selection_criterion must be 'full_vqd' or 'energy_only'.")
