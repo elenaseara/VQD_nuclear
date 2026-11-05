@@ -23,8 +23,8 @@ class ReferenceData:
 
     occupied_orbitals: list[int]
     diagonal_energy: float
-    first_active_operator: int
-    first_active_diff: float
+    first_active_operator: int | None = None
+    first_active_diff: float | None = None
 
 
 def clean_pauli_string(pauli_string: tuple[tuple[int, str], ...]) -> tuple[tuple[int, str], ...]:
@@ -212,17 +212,14 @@ def find_first_active_operator(occupied_orbitals: tuple[int, ...], *, n_qubits: 
 
 
 def find_reference_from_hamiltonian_basis(problem: ProblemConfig, nucleus: Any, *, n_qubits: int, qubit_hamiltonian: Any, qubit_generator_pool: list[Any], backend: Any) -> ReferenceData:
-    """Choose the lowest-energy Slater determinant activated by the ADAPT pool."""
+    """
+    Choose the lowest-energy Slater determinant.
+    Whether it is or not activated by the ADAPT pool.
+    """
     n_valence_particles = int(problem.n_valence_protons + problem.n_valence_neutrons)
     references = get_hamiltonian_basis_references(nucleus, n_qubits=n_qubits, n_valence_particles=n_valence_particles)
-    ranked = sorted((diagonal_energy(occ, qubit_hamiltonian), occ) for occ in references)
-    for energy, occupied_orbitals in ranked:
-        operator_index, diff = find_first_active_operator(
-            occupied_orbitals,
-            n_qubits=n_qubits,
-            qubit_generator_pool=qubit_generator_pool,
-            backend=backend,
-        )
-        if operator_index is not None:
-            return ReferenceData(list(occupied_orbitals), float(energy), int(operator_index), float(diff))
-    raise RuntimeError("No active reference determinant found in the Hamiltonian basis.")
+
+    energies = np.array([diagonal_energy(occ, qubit_hamiltonian) for occ in references])
+    j = int(np.argmin(energies))
+
+    return ReferenceData(list(references[j]), float(energies[j]))
