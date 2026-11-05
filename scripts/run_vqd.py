@@ -37,9 +37,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
     "--beta",
     type=parse_beta,
-    default="auto",
+    default="basis",
     help=(
-        "VQD penalty coefficient. 'auto' (default) derives it from the exact "
+        "VQD penalty coefficient. 'basis' (default) derives it from the basis Hamiltonian as" \
+        "E_i - E_(i-1) + 2B; with B = max_j sum_{k!=j} |H_jk|. 'auto' derives it from the exact "
         "spectrum as 2*max_i|E_i - E_0|. An explicit value is respected; if it "
         "is below the largest requested gap you get a warning, not an override."
     ),
@@ -223,10 +224,14 @@ def main() -> int:
 def parse_beta(value: str):
     if value.strip().lower() == "auto":
         return "auto"
+
+    if value.strip().lower() == "basis":
+        return "basis"
+    
     try:
         beta = float(value)
     except ValueError:
-        raise argparse.ArgumentTypeError(f"beta must be a number or 'auto', got {value!r}")
+        raise argparse.ArgumentTypeError(f"beta must be a number or 'auto' | 'basis', got {value!r}")
     if beta < 0.0:
         raise argparse.ArgumentTypeError("beta must be non-negative")
     return beta

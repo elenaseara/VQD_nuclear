@@ -16,7 +16,7 @@ from .config import FullQuantumLimits, NumericalConfig, ProblemConfig, RunConfig
 from .hamiltonian import HamiltonianData, build_hamiltonian_data
 from .measurements import MeasurementEngine, apply_qubit_operator_to_state
 from .parallel import parallel_map, resolve_n_jobs
-from .validation import resolve_beta
+from .validation import resolve_beta, get_beta
 from .model_space import ModelSpaceEngine, model_space_indices
 
 
@@ -472,7 +472,19 @@ def run_vqd_family(context: VQDContext, *, cost_mode: str, options: dict[str, An
 def run_workflow(problem: ProblemConfig, run: RunConfig, numerical: NumericalConfig, full_limits: FullQuantumLimits, *, qibo_backend: str = "numpy") -> dict[str, Any]:
     """Execute the complete VQD workflow and return all numerical results."""
     context = build_context(problem, run, numerical, qibo_backend=qibo_backend)
-    beta_check = resolve_beta(run.beta, context.hamiltonian.exact_energies, run.n_states)
+    
+    basis_beta = None
+    if isinstance(run.beta, str) and run.beta.strip().lower() == "basis":
+        refs = get_hamiltonian_basis_references(
+            context.hamiltonian.nucleus,
+            n_qubits=context.hamiltonian.n_qubits,
+            n_valence_particles=problem.n_valence_protons + problem.n_valence_neutrons,
+        )
+        basis_beta = get_beta(refs, context.hamiltonian.qubit_hamiltonian,
+                              context.hamiltonian.n_qubits, run.n_states)
+        
+    beta_check = resolve_beta(run.beta, context.hamiltonian.exact_energies, run.n_states,
+                              basis_beta=basis_beta)
     run.beta = float(beta_check["beta"])
 
     statevector_results: list[dict[str, Any]] = []
