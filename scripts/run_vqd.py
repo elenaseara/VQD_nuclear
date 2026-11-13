@@ -40,7 +40,7 @@ def build_parser() -> argparse.ArgumentParser:
     default="basis",
     help=(
         "VQD penalty coefficient. 'basis' (default) derives it from the basis Hamiltonian as" \
-        "E_i - E_(i-1) + 2B; with B = max_j sum_{k!=j} |H_jk|. 'auto' derives it from the exact "
+        "E_i - E_0 + 2B; with B = max_j sum_{k!=j} |H_jk|. 'auto' derives it from the exact "
         "spectrum as 2*max_i|E_i - E_0|. An explicit value is respected; if it "
         "is below the largest requested gap you get a warning, not an override."
     ),
@@ -111,7 +111,7 @@ def build_parser() -> argparse.ArgumentParser:
                             "g^E + g^penalty (full_vqd) or g^E (energy_only)."
                         ),
     )
-    parser.add_argument("--gradient-diagnostics", type=bool, default=False,
+    parser.add_argument("--gradient-diagnostics", type=parse_bool, default=False,
         help="Stores, for each ADAPT iteration, the operator that would have"
             "been selected by using g^E alone, instead of g^E + g^penalty.")
     

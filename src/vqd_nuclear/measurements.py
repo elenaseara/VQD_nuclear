@@ -215,10 +215,10 @@ class MeasurementEngine:
 
 
     ####################################################################################
-    ##########################   RUTA MUESTREADA (FASE D)   ############################
+    ##########################       RUTA MUESTREADA        ############################
     ####################################################################################
 
-    # -- planes (fase C), perezosos y cacheados ---------------------------------------
+    # -- planes, perezosos y cacheados ---------------------------------------
 
     def _plan_for(self, operator, *, gradient: bool):
         if self.measurement_strategy == "qwc":
@@ -242,7 +242,7 @@ class MeasurementEngine:
         return self.energy_plan.summary()
 
     def gradient_operator(self, mu: int):
-        """G_mu = PHASE [H, A_mu] (fase B), cacheado por candidato."""
+        """G_mu = PHASE [H, A_mu], cacheado por candidato."""
         mu = int(mu)
         if mu not in self._gradient_operators:
             self._gradient_operators[mu] = build_gradient_operator(
@@ -250,7 +250,7 @@ class MeasurementEngine:
         return self._gradient_operators[mu]
 
     def gradient_plan(self, mu: int):
-        """Plan de medida de G_mu (fase C), cacheado por candidato."""
+        """Plan de medida de G_mu, cacheado por candidato."""
         mu = int(mu)
         if mu not in self._gradient_plans:
             self._gradient_plans[mu] = self._plan_for(self.gradient_operator(mu), gradient=True)
@@ -273,7 +273,7 @@ class MeasurementEngine:
         """g^E_mu = <psi|G_mu|psi> con shots (seccion 14).
 
         Mismo numero y mismo signo que statevector_energy_gradient cuando
-        nshots -> inf (bloque 5 de test_pauli_algebra + fase C).
+        nshots -> inf.
         """
         if base_circuit is None:
             base_circuit = self.ansatz_builder.build(thetas, operator_indices)
@@ -304,7 +304,7 @@ class MeasurementEngine:
 
     def destructive_swap_overlap(self, thetas_i: list[float], ops_i: list[int],
                                  thetas_k: list[float], ops_k: list[int], *, nshots: int) -> float:
-        """|<psi_i|psi_k>|^2 con el SWAP destructivo (seccion 16.2, fase E)."""
+        """|<psi_i|psi_k>|^2 con el SWAP destructivo (seccion 16.2)."""
         return sampling.destructive_swap_overlap(
             self.ansatz_builder.build(thetas_i, ops_i),
             self.ansatz_builder.build(thetas_k, ops_k),

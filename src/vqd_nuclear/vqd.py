@@ -98,12 +98,9 @@ def build_context(problem: ProblemConfig, run: RunConfig, numerical: NumericalCo
         measurement_strategy=numerical.measurement_strategy,
         model_space=model_space,
     )
-    active_operator_indices = find_active_operators(
-        ansatz_builder,
-        operator_count=len(hamiltonian.qubit_generator_pool),
-        n_jobs=numerical.n_jobs,
-        available_workers=available_workers,
-    )
+    
+    active_operator_indices = list(range(len(hamiltonian.qubit_generator_pool)))
+
     return VQDContext(
         problem=problem,
         run=run,
@@ -199,15 +196,16 @@ def select_next_operator(context: VQDContext, thetas: list[float], operator_indi
                           max_candidates: int | None, n_jobs: int | str | None, overlap_shots: int, energy_shots: int,
                           cost_mode: str, gradient_method: str = "analytic", selection_criterion: str = "full_vqd",
                           ) -> tuple[int | None, float]:
-    """Select the unused candidate with the largest absolute ADAPT gradient.
+    """Select the candidate with the largest absolute ADAPT gradient.
+    Operators may be reused, except the one added in the previous iteration
 
     The default uses the analytic gradient of the full VQD objective. For
     excited states, this includes the derivative of the overlap-penalty terms.
     The legacy finite-difference path remains available for comparisons with
     ``gradient_method=finite_difference``.
     """
-    used = set(operator_indices)
-    candidates = [idx for idx in get_candidate_operators(context, max_candidates) if idx not in used]
+    last = int(operator_indices[-1]) if operator_indices else None
+    candidates = [idx for idx in get_candidate_operators(context, max_candidates) if idx != last]
 
     if not candidates:
         return None, 0.0, None
@@ -311,7 +309,7 @@ def run_adapt_vqd(context: VQDContext, *, previous_ansatze: list[dict[str, Any]]
     thetas: list[float] = []
     operator_indices: list[int] = []
     history: list[dict[str, Any]] = []
-    max_layers = min(int(max_adapt_iter), len(get_candidate_operators(context, max_candidates)))
+    max_layers = int(max_adapt_iter)
     previous_objective: float | None = None
     last_improvement: float | None = None
 

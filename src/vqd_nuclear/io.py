@@ -29,23 +29,30 @@ def as_clean_string(values: list[Any] | tuple[Any, ...] | None, precision: int =
     return "[" + ", ".join(cleaned) + "]"
 
 
+def _json_safe(value: Any) -> Any:
+    """Convierte recursivamente a tipos JSON validos: arrays a listas, escalares
+    de NumPy a Python y no finitos (NaN, inf) a None, tambien dentro de listas y
+    diccionarios anidados (history). json.dumps escribiria NaN literal, que no
+    es JSON valido."""
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    if isinstance(value, np.ndarray):
+        return _json_safe(value.tolist())
+    if isinstance(value, (np.bool_,)):
+        return bool(value)
+    if isinstance(value, (np.integer,)):
+        return int(value)
+    if isinstance(value, (np.floating, float)):
+        value = float(value)
+        return value if np.isfinite(value) else None
+    return value
+
+
 def serializable_result(result: dict[str, Any]) -> dict[str, Any]:
     """Return a JSON-safe version of one result dictionary."""
-    clean: dict[str, Any] = {}
-    for key, value in result.items():
-        if key == "circuit":
-            continue
-        if isinstance(value, np.ndarray):
-            clean[key] = value.tolist()
-        elif isinstance(value, (np.integer,)):
-            clean[key] = int(value)
-        elif isinstance(value, (np.floating,)):
-            clean[key] = float(value)
-        elif isinstance(value, float) and not np.isfinite(value):
-            clean[key] = None
-        else:
-            clean[key] = value
-    return clean
+    return {key: _json_safe(value) for key, value in result.items() if key != "circuit"}
 
 
 def build_summary_dataframe(results: list[dict[str, Any]], label: str, run_id: str) -> pd.DataFrame:
@@ -377,7 +384,7 @@ def save_outputs(output: OutputConfig, *, run_id: str, problem: ProblemConfig, r
             "statevector_results": [serializable_result(r) for r in statevector_results],
             "full_quantum_circuit_results": [serializable_result(r) for r in full_quantum_circuit_results],
         }
-        json_path.write_text(json.dumps(raw, indent=2), encoding="utf-8")
+        json_path.write_text(json.dumps(_json_safe(raw), indent=2, allow_nan=False), encoding="utf-8")
 
         diagnostics_rows = []
         for label, group in (("statevector", statevector_results),

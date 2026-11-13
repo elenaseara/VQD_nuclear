@@ -7,7 +7,7 @@ grupo), 11-12 (plan del gradiente) y 13 (QWC residual).
 QUE HACE
 --------
 Recibe un operador escrito como suma de cadenas de Pauli -- el Hamiltoniano H_q
-o el observable del gradiente G_mu de la fase B -- y lo reparte en CIRCUITOS DE
+o el observable del gradiente G_mu -- y lo reparte en CIRCUITOS DE
 MEDIDA. Cada circuito es un cambio de base que se anade detras del ansatz y que
 deja diagonal una parte del operador, de modo que su valor esperado se obtiene
 de las probabilidades de los bitstrings medidos:
@@ -79,7 +79,7 @@ CONVENIOS
 - Base computacional: el qubit q pesa 1 << (n_qubits - 1 - q). Igual que
   apply_pauli_string_to_state.
 - Indice LOCAL de un grupo: el qubit support[0] es el bit mas significativo.
-  La fase D debe medir los qubits en el orden de `support` y usar
+  La medición muestreada debe medir los qubits en el orden de `support` y usar
   `group.local_index_from_bits` o `group.diagonal_value`.
 - Puertas: ("CNOT", control, target), ("H", q), ("SDG", q) con SDG = S^dagger,
   ("RX", q, theta) con RX(theta) = exp(-i theta X / 2) (misma convencion que
@@ -110,7 +110,7 @@ _HADAMARD = np.array([[1, 1], [1, -1]], dtype=complex) / np.sqrt(2.0)
 # 1. Simulacion de las puertas de medida (sin Qibo)
 # =====================================================================
 # Sirve para dos cosas: construir la unitaria V de cada cambio de base y
-# calcular el valor esperado EXACTO (limite de shots infinitos) que la fase D
+# calcular el valor esperado EXACTO (limite de shots infinitos) que luego se
 # tendra que reproducir con muestreo.
 
 def _apply_gate(psi: np.ndarray, gate: Gate, n: int) -> np.ndarray:
@@ -511,7 +511,7 @@ class MeasurementPlan:
 
     def exact_expectation(self, state: np.ndarray, n_qubits: int) -> float:
         """Limite de shots infinitos: cada circuito aplicado al estado, P(x)
-        exactas y suma de D_xx P(x). Es el numero que la fase D debe reproducir.
+        exactas y suma de D_xx P(x).
         """
         media, _ = self.exact_statistics(state, n_qubits)
         return media
@@ -524,7 +524,7 @@ class MeasurementPlan:
             Var = sum_x P(x) D_xx^2 - (sum_x P(x) D_xx)^2.
         Con nshots por circuito y circuitos independientes, el error tipico del
         estimador es sqrt(sum_g Var_g / nshots). Es la referencia contra la que
-        se juzga la ruta muestreada (fase D): no "se parece al exacto", sino
+        se juzga la ruta muestreada: no "se parece al exacto", sino
         "se aleja de el lo que el ruido de shots permite".
         """
         media = complex(self.identity).real

@@ -6,7 +6,7 @@ Pseudocodigo: secciones 8 (medir un grupo), 14 (gradiente muestreado) y 16.2
 
 QUE HACE
 --------
-La fase C dice QUE medir: para cada circuito, las puertas del cambio de base,
+MeasurementPlan medir: para cada circuito, las puertas del cambio de base,
 los qubits a medir (`support`) y el valor de cada bitstring (`diagonal_value`).
 Este modulo lo EJECUTA:
 

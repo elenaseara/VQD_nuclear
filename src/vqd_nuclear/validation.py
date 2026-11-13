@@ -230,10 +230,10 @@ def determinant_basis_matrix(references, qubit_hamiltonian, n_qubits: int) -> np
     return H
  
 def diagonal_gap_term(H_basis: np.ndarray, n_states: int) -> dict:
-    """Primer termino de beta: E_i - E_k con los elementos DIAGONALES ordenados.
+    """Primer termino de beta: E_i - E_k con los elementos diagonales ordenados.
  
     i = estado excitado mas alto simulado (n_states - 1, contando desde 0),
-    k = i - 1.
+    k = 0.
     """
     n_states = int(n_states)
     diagonal = np.sort(np.real(np.diag(H_basis)))
@@ -243,7 +243,7 @@ def diagonal_gap_term(H_basis: np.ndarray, n_states: int) -> dict:
     if n_states > d:
         raise ValueError(f"Se piden {n_states} estados y el espacio del modelo tiene {d} determinantes.")
     i = n_states - 1
-    k = i - 1
+    k = 0
     return {
         "diagonal_sorted": diagonal,
         "i": i,
@@ -266,7 +266,7 @@ def off_diagonal_bound(H_basis: np.ndarray) -> dict:
 def get_beta(references, qubit_hamiltonian, n_qubits: int, n_states: int) -> dict:
     """Beta a partir de la matriz en la base de determinantes.
  
-    El cálculo es: Beta = E_i - E_k + 2B; siendo B el mayor valor de la suma por filas
+    El cálculo es: Beta = E_i - E_0 + 2B; siendo B el mayor valor de la suma por filas
     de todos los elementos no diagonales de H_jl.
 
     """
@@ -284,7 +284,7 @@ def get_beta(references, qubit_hamiltonian, n_qubits: int, n_states: int) -> dic
         **termino_1,
         **termino_2,
         "beta": beta,
-        "formula": "beta = (E_i - E_k) + 2B;"
-                    "i = n_states-1, k = i-1; B = max_j sum_{k!=j} |H_jk|"
+        "formula": "beta = (E_i - E_0) + 2B;"
+                    "i = n_states-1; B = max_j sum_{k!=j} |H_jk|"
     }
  
