@@ -83,6 +83,7 @@ def build_summary_dataframe(results: list[dict[str, Any]], label: str, run_id: s
             "operators": as_clean_string(result.get("ops", []), precision=0),
             "thetas": as_clean_string(result.get("thetas", []), precision=12),
             "selection_criterion": result.get("selection_criterion", ""),
+            "termination_reason": result.get("termination_reason", ""),
         })
     return pd.DataFrame(rows)
 
@@ -228,6 +229,10 @@ def build_history_dataframe(results: list[dict[str, Any]], label: str, run_id: s
             row["method"] = label
             row["state"] = state_index
             row["overlaps_with_previous"] = as_clean_string(row.get("overlaps_with_previous", []), precision=8)
+            if "ops" in row:
+                row["ops"] = as_clean_string(row["ops"], precision=0)
+            if "thetas" in row:
+                row["thetas"] = as_clean_string(row["thetas"], precision=12)
             rows.append(row)
     return pd.DataFrame(rows)
 
@@ -312,7 +317,10 @@ def write_single_readable_txt_report(path: Path, *, run_id: str, context: "VQDCo
         add_section("MATCHED VALIDATION SUMMARY", format_table(matched_validation_df))
     if energy_sorted_df is not None and not energy_sorted_df.empty:
         add_section("ENERGY-SORTED SUMMARY", format_table(energy_sorted_df))
-    add_section("ADAPT ITERATION HISTORY", format_table(history_df))
+    # The ansatz of every iteration (ops, thetas) is in the CSV and the JSON; in
+    # the text report it would make each row unreadable.
+    history_columns = [c for c in history_df.columns if c not in ("ops", "thetas")]
+    add_section("ADAPT ITERATION HISTORY", format_table(history_df, columns=history_columns))
     add_section("FINAL VARIATIONAL PARAMETERS", format_table(parameters_df))
     add_section("EXACT STATEVECTOR OVERLAP MATRIX", overlap_df.to_string(float_format="{:.12g}".format) if not overlap_df.empty else "No statevector states were generated.")
     path.write_text("\n".join(sections), encoding="utf-8")

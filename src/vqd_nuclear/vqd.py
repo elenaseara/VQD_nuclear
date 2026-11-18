@@ -358,6 +358,9 @@ def run_adapt_vqd(context: VQDContext, *, previous_ansatze: list[dict[str, Any]]
 
     diagnostics: list[Any] = []
     state_index = len(previous_ansatze)
+    # Why the loop ended. Overwritten by every early exit below.
+    termination_reason = "max_adapt_iter"
+    stop_gradient: float | None = None
 
     for iteration in range(max_layers):
         operator_index, gradient, scan = select_next_operator(
@@ -377,6 +380,16 @@ def run_adapt_vqd(context: VQDContext, *, previous_ansatze: list[dict[str, Any]]
             penalty_gradient_shots=penalty_gradient_shots
         )
         if operator_index is None:
+            termination_reason = "no_candidates"
+            break
+
+        # Stop BEFORE adding the operator if its gradient is already below
+        # grad_tol. Checking it after optimizing (as before) cost a full
+        # optimization of a layer that ends with theta ~ 0. The first iteration
+        # always adds a layer, as before.
+        if iteration > 0 and abs(float(gradient)) < float(grad_tol):
+            termination_reason = "small_gradient"
+            stop_gradient = float(gradient)
             break
 
         diagnostic = None
@@ -404,6 +417,12 @@ def run_adapt_vqd(context: VQDContext, *, previous_ansatze: list[dict[str, Any]]
         )
         energy = evaluate_energy(context, thetas, operator_indices, cost_mode=cost_mode, energy_shots=energy_shots, n_jobs=workers)
         overlaps = compute_previous_overlaps(context, thetas, operator_indices, previous_ansatze, n_jobs=workers, cost_mode=cost_mode, overlap_shots=overlap_shots)
+        # Objective re-evaluated at the returned thetas with the energy and
+        # overlaps just measured. In the sampled route objective_value is the
+        # minimum COBYLA found among noisy evaluations, which is biased low;
+        # this one is an independent estimate. In statevector both coincide.
+        objective_reevaluated = float(energy) + float(np.sum(
+            [float(beta) * float(overlap) for beta, overlap in zip(betas, overlaps)]))
         exact_target_energy = float(context.hamiltonian.exact_energies[state_index]) if len(context.hamiltonian.exact_energies) > state_index else np.nan
         energy_error = float(energy - exact_target_energy) if np.isfinite(exact_target_energy) else np.nan
         record = {
@@ -416,6 +435,7 @@ def run_adapt_vqd(context: VQDContext, *, previous_ansatze: list[dict[str, Any]]
             "selected_g_penalty": None if scan is None else float(scan.g_penalty[operator_index]),
             "physical_energy": float(energy),
             "vqd_objective": float(objective_value),
+            "vqd_objective_reevaluated": objective_reevaluated,
             "exact_target_energy": exact_target_energy,
             "energy_error": energy_error,
             "abs_energy_error": abs(energy_error) if np.isfinite(energy_error) else np.nan,
@@ -425,6 +445,10 @@ def run_adapt_vqd(context: VQDContext, *, previous_ansatze: list[dict[str, Any]]
             "optimizer_message": str(getattr(result, "message", "")),
             "optimizer_nfev": int(getattr(result, "nfev", -1)),
             "overlaps_with_previous": [float(x) for x in overlaps],
+            # Ansatz after this iteration, so the state can be rebuilt offline
+            # (e.g. fidelity per iteration from the JSON).
+            "ops": [int(op) for op in operator_indices],
+            "thetas": [float(theta) for theta in thetas],
         }
 
         if diagnostic is not None:
@@ -449,22 +473,21 @@ def run_adapt_vqd(context: VQDContext, *, previous_ansatze: list[dict[str, Any]]
             # For excited-state VQD, the physical energy can increase while the
             # penalized objective decreases because the orthogonality penalty is
             # being reduced. Therefore convergence must be assessed with the
-            # VQD objective, not with the physical energy alone.
-            last_improvement = float(previous_objective) - float(objective_value)
+            # VQD objective, not with the physical energy alone. The
+            # re-evaluated objective is used, not COBYLA's biased minimum.
+            last_improvement = float(previous_objective) - objective_reevaluated
 
-        small_gradient = abs(float(gradient)) < float(grad_tol)
         stagnant_objective = last_improvement is not None and last_improvement < float(energy_improvement_tol)
         tiny_new_parameter = len(thetas) > 0 and abs(float(thetas[-1])) < float(new_theta_tol)
 
         # Do not stop only because the last theta is tiny: COBYLA and shot-based
         # objectives can return a near-zero new parameter before the existing
-        # ansatz has fully relaxed. Require objective stagnation and a small
-        # analytic gradient as well.
-        if iteration > 0 and small_gradient:
+        # ansatz has fully relaxed. Require objective stagnation as well. (The
+        # small-gradient stop is checked before adding the layer, above.)
+        if iteration > 0 and stagnant_objective and tiny_new_parameter:
+            termination_reason = "stagnant_objective_tiny_theta"
             break
-        if iteration > 0 and stagnant_objective and (small_gradient or tiny_new_parameter):
-            break
-        previous_objective = float(objective_value)
+        previous_objective = objective_reevaluated
 
     final_energy = evaluate_energy(context, thetas, operator_indices, cost_mode=cost_mode, energy_shots=energy_shots, n_jobs=workers)
     exact_target_energy = float(context.hamiltonian.exact_energies[state_index]) if len(context.hamiltonian.exact_energies) > state_index else np.nan
@@ -497,6 +520,9 @@ def run_adapt_vqd(context: VQDContext, *, previous_ansatze: list[dict[str, Any]]
         "new_theta_tol": float(new_theta_tol),
         "energy_improvement_tol": float(energy_improvement_tol),
         "beta": float(betas[0]) if betas else 0.0,
+        "termination_reason": termination_reason,
+        # Gradient that triggered the small_gradient stop (None otherwise).
+        "stop_gradient": stop_gradient,
         "history": history,
         "selection_criterion": str(selection_criterion),
         "gradient_diagnostics": [d.as_row() for d in diagnostics],
