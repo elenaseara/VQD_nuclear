@@ -73,6 +73,9 @@ def build_summary_dataframe(results: list[dict[str, Any]], label: str, run_id: s
             "n_parameters": int(result.get("n_parameters", 0)),
             "overlap_shots": int(result.get("overlap_shots", 0)),
             "energy_shots": int(result.get("energy_shots", 0)),
+            "penalty_gradient_shots": int(result.get("penalty_gradient_shots", 0)),
+            "circuits_executed": int(result.get("circuits_executed", 0)),
+            "shots_used": int(result.get("shots_used", 0)),
             "optimizer_maxiter": int(result.get("optimizer_maxiter", 0)),
             "max_adapt_iter": int(result.get("max_adapt_iter", 0)),
             "max_candidates": result.get("max_candidates", None),
@@ -295,6 +298,7 @@ def write_single_readable_txt_report(path: Path, *, run_id: str, context: "VQDCo
         f"Beta check: {beta_check.get('message', '')}",
         f"Measurement strategy: {getattr(context.measurements, 'measurement_strategy', 'n/a')}",
         f"Measurement circuits: {getattr(context.measurements, 'measurement_summary', 'n/a (planes diferidos)')}",
+        f"Sampled-route usage (whole run): {getattr(context.measurements, 'usage', 'n/a')}",
     ]
     add_section("VQD RUN METADATA", "\n".join(metadata_lines))
     add_section("PROBLEM CONFIGURATION", "\n".join(f"{k}: {v}" for k, v in dataclass_to_dict(problem).items()))

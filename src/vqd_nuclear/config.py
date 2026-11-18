@@ -41,6 +41,7 @@ class NumericalConfig:
     cobyla_rhoend: float = 5e-3
     overlap_shots: int = 200000
     energy_shots: int = 200000
+    penalty_gradient_shots: int | None = None   # sampled route only (None = energy_shots)
     new_theta_tol: float = 1e-3
     energy_improvement_tol: float = 1e-4
     gradient_method: str = "analytic"

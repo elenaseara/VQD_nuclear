@@ -75,8 +75,12 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Radio inicial del simplex de COBYLA.")
     parser.add_argument("--cobyla-rhoend", type=float, default=5e-3,
                         help="Radio final de COBYLA (el 'tol' de SciPy).")
-    parser.add_argument("--overlap-shots", type=int, default=200000)
-    parser.add_argument("--energy-shots", type=int, default=200000)
+    parser.add_argument("--overlap-shots", type=parse_positive_int, default=200000)
+    parser.add_argument("--energy-shots", type=parse_positive_int, default=200000)
+    parser.add_argument("--penalty-gradient-shots", type=parse_positive_int, default=None,
+        help=("Shots per penalty-gradient circuit in full_quantum_circuit (one circuit "
+              "per previous state and Pauli string of each candidate). "
+              "Default: the value of --energy-shots. Ignored by statevector_exact."))
     parser.add_argument("--new-theta-tol", type=float, default=1e-3)
     parser.add_argument("--energy-improvement-tol", type=float, default=1e-4)
     parser.add_argument(
@@ -184,6 +188,7 @@ def main() -> int:
         cobyla_rhoend=args.cobyla_rhoend,
         overlap_shots=args.overlap_shots,
         energy_shots=args.energy_shots,
+        penalty_gradient_shots=args.penalty_gradient_shots,
         new_theta_tol=args.new_theta_tol,
         energy_improvement_tol=args.energy_improvement_tol,
         gradient_method=args.gradient_method,
@@ -219,6 +224,17 @@ def main() -> int:
     for name, path in paths.items():
         logging.info("Saved %s: %s", name, path)
     return 0
+
+
+def parse_positive_int(value: str) -> int:
+    """Parse a strictly positive integer (a number of shots)."""
+    try:
+        number = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected a positive integer, got {value!r}")
+    if number < 1:
+        raise argparse.ArgumentTypeError(f"expected a positive integer, got {number}")
+    return number
 
 
 def parse_beta(value: str):

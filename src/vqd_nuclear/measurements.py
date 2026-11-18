@@ -121,11 +121,26 @@ class MeasurementEngine:
         self._gradient_operators = {}
         self._gradient_plans = {}
 
+        # For G_pen in sampled route: 
+        #  - Cache for U_j^dag for prev. states ord by (thetas, ops)
+        #  - Store (P, t) of each generator (P != I and t != 0).
+        self._inverse_cache: OrderedDict = OrderedDict()
+        self.max_inverse_cache_items = 32
+        self._penalty_terms: dict[int, list[tuple[PauliTerm, float]]] = {}
+
+        # Recuento del consumo de la ruta muestreada: circuitos ejecutados y shots totales.
+        self.usage = {"circuits": 0, "shots": 0}
+
+
+    def _count(self, n_circuits: int, nshots: int) -> None:
+        self.usage["circuits"] += int(n_circuits)
+        self.usage["shots"] += int(n_circuits) * int(nshots)
 
 
     def clear_cache(self) -> None:
         self.ansatz_builder.clear_cache()
         self._energy_cache.clear()
+        self._inverse_cache.clear()
 
 
     def _cache_set(self, key: tuple[tuple[float, ...], tuple[int, ...]], value: float) -> None:
@@ -258,6 +273,15 @@ class MeasurementEngine:
 
     # -- estimadores con shots ------------------------------------------------------
 
+    def sampled_energy_with_error(self, thetas: list[float], operator_indices: list[int], *,
+                                  nshots: int) -> tuple[float, float]:
+        """(energia, error tipico estimado de la varianza de los propios shots)."""
+        base = self.ansatz_builder.build(thetas, operator_indices)
+        plan = self.energy_plan
+        self._count(len(plan.all_groups()), nshots)
+        return sampling.sampled_expectation_with_error(plan, base, int(nshots))
+
+
     def sampled_energy(self, thetas: list[float], operator_indices: list[int], *,
                        nshots: int, n_jobs=None) -> float:
         """<psi(theta)|H|psi(theta)> con shots. `nshots` es por circuito.
@@ -265,8 +289,21 @@ class MeasurementEngine:
         `n_jobs` se acepta por compatibilidad con vqd.py y se ignora.
         """
         del n_jobs
-        base = self.ansatz_builder.build(thetas, operator_indices)
-        return sampling.sampled_expectation(self.energy_plan, base, int(nshots))
+        energia, _ = self.sampled_energy_with_error(thetas, operator_indices, nshots=nshots)
+        return energia
+
+    
+    def sampled_energy_gradient_with_error(self, thetas: list[float], operator_indices: list[int],
+                                           mu: int, *, nshots: int,
+                                           base_circuit=None) -> tuple[float, float]:
+        """(g^E_mu, error tipico). Un G_mu vacio da (0, 0) sin ejecutar circuitos"""
+
+        if base_circuit is None:
+            base_circuit = self.ansatz_builder.build(thetas, operator_indices)
+        plan = self.gradient_plan(mu)
+        self._count(len(plan.all_groups()), nshots)
+        return sampling.sampled_expectation_with_error(plan, base_circuit, int(nshots))
+
 
     def sampled_energy_gradient(self, thetas: list[float], operator_indices: list[int],
                                 mu: int, *, nshots: int, base_circuit=None) -> float:
@@ -275,36 +312,163 @@ class MeasurementEngine:
         Mismo numero y mismo signo que statevector_energy_gradient cuando
         nshots -> inf.
         """
+        gE, _ = self.sampled_energy_gradient_with_error(
+            thetas, operator_indices, mu, nshots=nshots, base_circuit=base_circuit)
+        return gE
+
+
+    def previous_inverse(self, thetas: list[float], operator_indices: list[int]):
+        """
+        Returns (and creates and stores, if not inside yet) U_j^dag from previous state.
+        """
+        key = self.ansatz_builder.cache_key(thetas, operator_indices)
+        inverse = self._inverse_cache.get(key)
+        if inverse is None:
+            inverse = sampling.inverse_circuit(self.ansatz_builder.build(thetas, operator_indices))
+            self._inverse_cache[key] = inverse
+            while len(self._inverse_cache) > self.max_inverse_cache_items:
+                self._inverse_cache.popitem(last=False)
+        else:
+            self._inverse_cache.move_to_end(key)
+        return inverse
+
+
+    def penalty_terms(self, mu: int) -> list[tuple[PauliTerm, float]]:
+        """
+        Returns (and creates and stores if needed) list [(P_l, t_l)] from 
+        hermitian generator T_mu = sum_l t_l P_l.
+
+        Skipped for coefficient == 0 or P = I.
+        All t_l shouold be real, if one has imag. part, an error may have happened when
+        applying -i factor in hamiltonian.py
+        """
+        mu = int(mu)
+        if mu not in self._penalty_terms:
+            terminos = []
+            for chain, coef in self.qubit_generator_pool[mu].terms.items():
+                coef = complex(coef)
+                if abs(coef.imag) > 1e-12:
+                    raise ValueError(
+                        f"Generator {mu}: complex coefficient {coef} in {chain}. "
+                        "T_mu should be hermitian -> real coefficients.")
+                if chain == () or coef.real == 0.0:
+                    continue
+                terminos.append((tuple((int(q), str(p)) for q, p in chain), float(coef.real)))
+            self._penalty_terms[mu] = terminos
+        return self._penalty_terms[mu]
+
+
+    def sampled_penalty_gradient_with_error(self, thetas: list[float], operator_indices: list[int],
+                                            mu: int, previous_ansatze, betas, *, nshots: int,
+                                            base_circuit=None) -> tuple[float, float]:
+        """
+        (g^pen_mu, standard error), calculated with measurements.
+
+            g^pen_mu = 2 sum_j beta_j sum_l t_l m_jl,
+            Var      = sum_j sum_l (2 beta_j t_l)^2 Var(m_jl),
+
+        m_jl = Re<psi|Pi_j(-iP_l)|psi> measured with `nshots` shots.
+        If no previous states (k = 0) or if beta_j = 0, no circuits are run.
+
+        """
+        previous_ansatze = list(previous_ansatze or [])
+        betas = list(betas or [])
+        if len(betas) != len(previous_ansatze):
+            raise ValueError(f"{len(previous_ansatze)} previous states and {len(betas)} betas.")
+        if not previous_ansatze:
+            return 0.0, 0.0         # if  k=0, no circuits measured
         if base_circuit is None:
             base_circuit = self.ansatz_builder.build(thetas, operator_indices)
-        return sampling.sampled_expectation(self.gradient_plan(mu), base_circuit, int(nshots))
+
+        g = 0.0
+        var = 0.0
+
+        for prev, beta in zip (previous_ansatze, betas):
+            beta = float(beta)
+            if beta == 0.0:
+                continue
+            inverse = self.previous_inverse(prev["thetas"], prev["ops"])
+            for chain, t in self.penalty_terms(mu):
+                m, var_m = sampling.sample_penalty_term(
+                    base_circuit, inverse, chain, self.n_qubits, int(nshots))
+                self._count(1, nshots)
+                weight = 2 * beta * t
+                g += weight * m
+                var += weight * weight * var_m
+
+        return float(g), float(np.sqrt(var))    
+
 
     def sampled_candidate_scan(self, thetas, operator_indices, candidates, *,
-                               nshots: int) -> "CandidateGradientScan":
-        """Barrido de candidatos en la ruta muestreada.
+                               nshots: int, previous_ansatze=None, betas=None,
+                               selection_criterion: str = "full_vqd",
+                               penalty_nshots: int | None = None) -> "CandidateGradientScan":
+        """
+        Barrido de candidatos en la ruta muestreada.
 
-        Frontera honesta: g_penalty NO es medible como valor esperado de un
-        observable (requiere un test de Hadamard entre dos estados), asi que la
-        ruta muestreada selecciona con g^E solo. Se devuelve g_total = g_energy
-        y g_penalty / max_overlap_amplitude como NaN ("no medido", no "cero").
+        Measures g^E_mu with G_mu plans.
+        Measures g^pen_mu depending on the case:
+            - if Reference state (no prev. states): g^pen = 0, no circuits run.
+            - selection_criterion="energy_only":  g_penalty = NaN, no circuits run,
+                selection uses only g_energy.
+            - selection_criterion="full_vqd": measured in penalty circuit. (using 
+            `penalty_nshots` for each circuit).
+
+        g_total = g^E + g^pen; the error adds variances (independent measurements).
+        U is built once and reused in every scan circuit.
         """
         if not candidates:
-            raise ValueError("No hay candidatos que barrer.")
+            raise ValueError("No candidates to scan.")
+        if selection_criterion not in ("full_vqd", "energy_only"):
+            raise ValueError("selection_criterion must be 'full_vqd' or 'energy_only'.")
+        previous_ansatze = list(previous_ansatze or [])
+        betas = list(betas or [])
+        if len(betas) != len(previous_ansatze):
+            raise ValueError(f"{len(previous_ansatze)} previous states and {len(betas)} betas.")
+        penalty_nshots = int(nshots if penalty_nshots is None else penalty_nshots)
+
         base = self.ansatz_builder.build(thetas, operator_indices)
-        g_energy = {int(mu): self.sampled_energy_gradient(thetas, operator_indices, int(mu),
-                                                          nshots=nshots, base_circuit=base)
-                    for mu in candidates}
+        nan = float("nan")
+        measure_penalty = bool(previous_ansatze) and selection_criterion == "full_vqd"
+
+        g_energy: dict[int, float] = {}
+        e_energy: dict[int, float] = {}
+        g_penalty: dict[int, float] = {}
+        e_penalty: dict[int, float] = {}
+        g_total: dict[int, float] = {}
+        e_total: dict[int, float] = {}
+
+        for mu in candidates:
+            mu = int(mu)
+            g_energy[mu], e_energy[mu] = self.sampled_energy_gradient_with_error(
+                thetas, operator_indices, mu, nshots=nshots, base_circuit=base)
+            if not previous_ansatze:
+                g_penalty[mu], e_penalty[mu] = 0.0, 0.0
+            elif measure_penalty:
+                g_penalty[mu], e_penalty[mu] = self.sampled_penalty_gradient_with_error(
+                    thetas, operator_indices, mu, previous_ansatze, betas,
+                    nshots=penalty_nshots, base_circuit=base)
+            else:
+                g_penalty[mu], e_penalty[mu] = nan, nan
+            g_total[mu] = g_energy[mu] + g_penalty[mu]
+            e_total[mu] = float(np.hypot(e_energy[mu], e_penalty[mu]))
+
         return CandidateGradientScan(
             candidates=[int(c) for c in candidates],
             g_energy=g_energy,
-            g_penalty={mu: float("nan") for mu in g_energy},
-            g_total=dict(g_energy),
-            max_overlap_amplitude=float("nan"),
+            g_penalty=g_penalty,
+            g_total=g_total,
+            max_overlap_amplitude=nan,
+            g_energy_stderr=e_energy,
+            g_penalty_stderr=e_penalty,
+            g_total_stderr=e_total,
         )
+    
 
     def destructive_swap_overlap(self, thetas_i: list[float], ops_i: list[int],
                                  thetas_k: list[float], ops_k: list[int], *, nshots: int) -> float:
         """|<psi_i|psi_k>|^2 con el SWAP destructivo (seccion 16.2)."""
+        self._count(1, nshots)
         return sampling.destructive_swap_overlap(
             self.ansatz_builder.build(thetas_i, ops_i),
             self.ansatz_builder.build(thetas_k, ops_k),
@@ -385,4 +549,8 @@ class CandidateGradientScan:
     g_penalty: dict[int, float]
     g_total: dict[int, float]
     max_overlap_amplitude: float      # max_j |<psi_j|psi>|
- 
+    # Only for sampled route: standard error for each g, estimated from shots.
+    # None for statevector, NaN if not measured.
+    g_energy_stderr: dict[int, float] | None = None
+    g_penalty_stderr: dict[int, float] | None = None
+    g_total_stderr: dict[int, float] | None = None

@@ -191,19 +191,57 @@ def analytic_gradient(task):
     return int(operator_index), float(gradient)
 
 
+def selection_scores(scan, selection_criterion: str) -> dict[int, float]:
+    """
+    Returns the gradient component used to rank the candidates of a scan.
+
+    full_vqd uses g_total and energy_only uses g_energy. 
+    A NaN score is treated as an error as it means that component
+    was not measured.
+    """
+    scores = scan.g_energy if selection_criterion == "energy_only" else scan.g_total
+    sin_medir = [mu for mu in scan.candidates if not np.isfinite(scores[mu])]
+    if sin_medir:
+        raise RuntimeError(
+            f"Selection score ({selection_criterion}) not available for candidates "
+            f"{sin_medir[:5]}{'...' if len(sin_medir) > 5 else ''}.")
+    return scores
+
+
+def selection_stderr(scan, selection_criterion: str, operator_index: int) -> float | None:
+    """Standard error of the selected score (sampled route only; None otherwise)."""
+    errors = scan.g_energy_stderr if selection_criterion == "energy_only" else scan.g_total_stderr
+    if errors is None:
+        return None
+    return float(errors[int(operator_index)])
+
+
 def select_next_operator(context: VQDContext, thetas: list[float], operator_indices: list[int],
                           previous_ansatze: list[dict[str, Any]], betas: list[float], *, eps: float,
                           max_candidates: int | None, n_jobs: int | str | None, overlap_shots: int, energy_shots: int,
                           cost_mode: str, gradient_method: str = "analytic", selection_criterion: str = "full_vqd",
-                          ) -> tuple[int | None, float]:
-    """Select the candidate with the largest absolute ADAPT gradient.
+                          penalty_gradient_shots: int | None = None,
+                          ) -> tuple[int | None, float, Any]:
+    """
+    Select the candidate with the largest absolute ADAPT gradient.
     Operators may be reused, except the one added in the previous iteration
 
-    The default uses the analytic gradient of the full VQD objective. For
-    excited states, this includes the derivative of the overlap-penalty terms.
+    The score depends on ``selection_criterion``, in BOTH routes:
+        full_vqd     |g^E + g^pen|  (full VQD objective)
+        energy_only  |g^E|
+    The returned gradient is the score that was actually used to select, so
+    the stopping test on grad_tol checks the same quantity.
+
+    In the sampled route g^pen is measured with the ancilla circuit (Schuld et
+    al. 2019) using ``penalty_gradient_shots`` per circuit (default:
+    ``energy_shots``); with energy_only it is not measured at all.
+
     The legacy finite-difference path remains available for comparisons with
     ``gradient_method=finite_difference``.
     """
+    if selection_criterion not in ("full_vqd", "energy_only"):
+        raise ValueError("selection_criterion must be 'full_vqd' or 'energy_only'.")
+
     last = int(operator_indices[-1]) if operator_indices else None
     candidates = [idx for idx in get_candidate_operators(context, max_candidates) if idx != last]
 
@@ -213,22 +251,24 @@ def select_next_operator(context: VQDContext, thetas: list[float], operator_indi
     if gradient_method == "analytic":
         if cost_mode == "full_quantum_circuit":
             scan = context.measurements.sampled_candidate_scan(
-                thetas, operator_indices, candidates, nshots=energy_shots)
+                thetas, operator_indices, candidates, 
+                nshots=energy_shots,
+                previous_ansatze=previous_ansatze,
+                betas=betas,
+                selection_criterion=selection_criterion,
+                penalty_nshots=energy_shots if penalty_gradient_shots is None else penalty_gradient_shots,
+            )
         else:
             scan = context.measurements.scan_candidate_gradients(
-                thetas, operator_indices, candidates, previous_ansatze, betas,
-                )
-        scores = scan.g_energy if selection_criterion == "energy_only" else scan.g_total
-        if selection_criterion not in ("full_vqd", "energy_only"):
-            raise ValueError("selection_criterion must be 'full_vqd' or 'energy_only'.")
+                thetas, operator_indices, candidates, previous_ansatze, betas)
+        scores = selection_scores(scan, selection_criterion)
 
+        # Ties (within 1e-9 relative) go to the lowest index
         best = max(abs(scores[mu]) for mu in scan.candidates)
-        treshold = best * (1.0 - 1e-9)
+        threshold = best * (1.0 - 1e-9)
+        winner = min(mu for mu in scan.candidates if abs(scores[mu]) >= threshold)
 
-        winner = min(mu for mu in scan.candidates if abs(scores[mu]) >= treshold)
-        #winner = max(scan.candidates, key=lambda mu: abs(scores[mu]))
-
-        return int(winner), float(scan.g_total[winner]), scan
+        return int(winner), float(scores[winner]), scan
     
     if gradient_method == "finite_difference":
         tasks = [(context, int(candidate), list(thetas), list(operator_indices),
@@ -300,12 +340,15 @@ def run_adapt_vqd(context: VQDContext, *, previous_ansatze: list[dict[str, Any]]
                   overlap_shots: int = 200000, energy_shots: int = 200000, optimizer_maxiter: int = 200, cobyla_rhobeg: float=0.03,
                   cobyla_rhoend: float = 5e-3, new_theta_tol: float = 1e-3, energy_improvement_tol: float = 1e-4,
                   cost_mode: str = "statevector_exact", gradient_method: str = "analytic", selection_criterion: str = "full_vqd",
-                  collect_gradient_diagnostics: bool = False, store_history: bool = True
+                  collect_gradient_diagnostics: bool = False, store_history: bool = True,
+                  penalty_gradient_shots: int | None = None,
                   ) -> dict[str, Any]:
     """Run ADAPT-VQD for one state."""
     previous_ansatze = previous_ansatze or []
     betas = betas or []
+    penalty_gradient_shots = int(energy_shots if penalty_gradient_shots is None else penalty_gradient_shots)
     workers = resolve_n_jobs(n_jobs, context.available_workers)
+    usage_start = dict(context.measurements.usage)
     thetas: list[float] = []
     operator_indices: list[int] = []
     history: list[dict[str, Any]] = []
@@ -331,15 +374,17 @@ def run_adapt_vqd(context: VQDContext, *, previous_ansatze: list[dict[str, Any]]
             cost_mode=cost_mode,
             gradient_method=gradient_method,
             selection_criterion=selection_criterion,
+            penalty_gradient_shots=penalty_gradient_shots
         )
         if operator_index is None:
             break
 
-        if collect_gradient_diagnostics and scan is not None:
-                    from .gradient_diagnostics import build_diagnostics
-                    diagnostics.append(build_diagnostics(
-                        scan, state_index=state_index, iteration=iteration,
-                    ))
+        diagnostic = None
+        if (collect_gradient_diagnostics and scan is not None
+                and all(np.isfinite(scan.g_total[mu]) for mu in scan.candidates)):
+            from .gradient_diagnostics import build_diagnostics
+            diagnostic = build_diagnostics(scan, state_index=state_index, iteration=iteration)
+            diagnostics.append(diagnostic)
 
         operator_indices.append(int(operator_index))
         thetas.append(0.0)
@@ -364,7 +409,11 @@ def run_adapt_vqd(context: VQDContext, *, previous_ansatze: list[dict[str, Any]]
         record = {
             "iteration": int(iteration),
             "selected_operator": int(operator_index),
-            "adapt_gradient": float(gradient),
+            "adapt_gradient": float(gradient),  #score used to select, g_total with full_vqd, g^E with energy_only).
+            "adapt_gradient_stderr": (None if scan is None
+                                      else selection_stderr(scan, selection_criterion, operator_index)),
+            "selected_g_energy": None if scan is None else float(scan.g_energy[operator_index]),
+            "selected_g_penalty": None if scan is None else float(scan.g_penalty[operator_index]),
             "physical_energy": float(energy),
             "vqd_objective": float(objective_value),
             "exact_target_energy": exact_target_energy,
@@ -378,11 +427,10 @@ def run_adapt_vqd(context: VQDContext, *, previous_ansatze: list[dict[str, Any]]
             "overlaps_with_previous": [float(x) for x in overlaps],
         }
 
-        if collect_gradient_diagnostics and scan is not None:
-            d = diagnostics[-1]
-            record["gradient_ranking_changed"] = bool(d.ranking_changed)
-            record["gradient_regret"] = float(d.regret)
-            record["winner_energy_only"] = int(d.winner_energy_only)
+        if diagnostic is not None:
+            record["gradient_ranking_changed"] = bool(diagnostic.ranking_changed)
+            record["gradient_regret"] = float(diagnostic.regret)
+            record["winner_energy_only"] = int(diagnostic.winner_energy_only)
 
         if store_history:
             history.append(record)
@@ -436,6 +484,10 @@ def run_adapt_vqd(context: VQDContext, *, previous_ansatze: list[dict[str, Any]]
         "gradient_method": str(gradient_method),
         "overlap_shots": int(overlap_shots),
         "energy_shots": int(energy_shots),
+        "penalty_gradient_shots": int(penalty_gradient_shots),
+        # Sampled-route cost of this state (0 in the statevector route).
+        "circuits_executed": int(context.measurements.usage["circuits"] - usage_start["circuits"]),
+        "shots_used": int(context.measurements.usage["shots"] - usage_start["shots"]),
         "optimizer_maxiter": int(optimizer_maxiter),
         "cobyla_rhobeg": float(cobyla_rhobeg),
         "cobyla_rhoend": float(cobyla_rhoend),
