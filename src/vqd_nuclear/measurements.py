@@ -96,7 +96,7 @@ class MeasurementEngine:
     """
     def __init__(self, *, ansatz_builder: "AnsatzBuilder", qubit_hamiltonian: Any,
                  n_qubits: int, available_workers: int, qubit_generator_pool=None, measurement_strategy: str = "paper", model_space=None,
-                 compression_fallback: bool = False) -> None:
+                 compression_fallback: bool = False, sampler: str = "qibo") -> None:
         self.ansatz_builder = ansatz_builder
         self.qubit_hamiltonian = qubit_hamiltonian
         self.n_qubits = int(n_qubits)
@@ -109,6 +109,17 @@ class MeasurementEngine:
         self.measurement_strategy = str(measurement_strategy)
         # Solo afecta a la estrategia "paper". No esta en el pseudocodigo.
         self.compression_fallback = bool(compression_fallback)
+
+        # How the sampled route produces the shots (simulation only):
+        #   "qibo": every measurement circuit is built and run in Qibo.
+        #   "born": the ansatz state is taken from AnsatzBuilder.state (the same
+        #           circuit simulated in Qibo, cached by (thetas, ops)), the few
+        #           gates of each circuit are applied to it, and the counts are
+        #           drawn from the Born-rule distribution. Same law of the counts,
+        #           same circuits and shots counted in `usage`. See sampling.py.
+        if sampler not in {"qibo", "born"}:
+            raise ValueError("sampler must be 'qibo' or 'born'.")
+        self.sampler = str(sampler)
 
         self._energy_cache: OrderedDict[tuple[tuple[float, ...], tuple[int, ...]], float] = OrderedDict()
         self.max_energy_cache_items = 128
@@ -273,12 +284,22 @@ class MeasurementEngine:
 
     # -- estimadores con shots ------------------------------------------------------
 
+    def _state(self, thetas: list[float], operator_indices: list[int]) -> np.ndarray:
+        """Ansatz state for the "born" sampler (cached by AnsatzBuilder).
+
+        Only the STATE is reused; every estimate draws new counts.
+        """
+        return np.asarray(self.ansatz_builder.state(thetas, operator_indices)).ravel()
+
     def sampled_energy_with_error(self, thetas: list[float], operator_indices: list[int], *,
                                   nshots: int) -> tuple[float, float]:
         """(energia, error tipico estimado de la varianza de los propios shots)."""
-        base = self.ansatz_builder.build(thetas, operator_indices)
         plan = self.energy_plan
         self._count(len(plan.all_groups()), nshots)
+        if self.sampler == "born":
+            return sampling.sampled_expectation_with_error_from_state(
+                plan, self._state(thetas, operator_indices), int(nshots), self.n_qubits)
+        base = self.ansatz_builder.build(thetas, operator_indices)
         return sampling.sampled_expectation_with_error(plan, base, int(nshots))
 
 
@@ -295,13 +316,21 @@ class MeasurementEngine:
     
     def sampled_energy_gradient_with_error(self, thetas: list[float], operator_indices: list[int],
                                            mu: int, *, nshots: int,
-                                           base_circuit=None) -> tuple[float, float]:
-        """(g^E_mu, error tipico). Un G_mu vacio da (0, 0) sin ejecutar circuitos"""
+                                           base_circuit=None, state=None) -> tuple[float, float]:
+        """(g^E_mu, error tipico). Un G_mu vacio da (0, 0) sin ejecutar circuitos.
 
-        if base_circuit is None:
-            base_circuit = self.ansatz_builder.build(thetas, operator_indices)
+        `base_circuit` (qibo) or `state` (born) can be passed to reuse them
+        across candidates; otherwise they are obtained here.
+        """
         plan = self.gradient_plan(mu)
         self._count(len(plan.all_groups()), nshots)
+        if self.sampler == "born":
+            if state is None:
+                state = self._state(thetas, operator_indices)
+            return sampling.sampled_expectation_with_error_from_state(
+                plan, state, int(nshots), self.n_qubits)
+        if base_circuit is None:
+            base_circuit = self.ansatz_builder.build(thetas, operator_indices)
         return sampling.sampled_expectation_with_error(plan, base_circuit, int(nshots))
 
 
@@ -360,7 +389,7 @@ class MeasurementEngine:
 
     def sampled_penalty_gradient_with_error(self, thetas: list[float], operator_indices: list[int],
                                             mu: int, previous_ansatze, betas, *, nshots: int,
-                                            base_circuit=None) -> tuple[float, float]:
+                                            base_circuit=None, state=None) -> tuple[float, float]:
         """
         (g^pen_mu, standard error), calculated with measurements.
 
@@ -377,7 +406,11 @@ class MeasurementEngine:
             raise ValueError(f"{len(previous_ansatze)} previous states and {len(betas)} betas.")
         if not previous_ansatze:
             return 0.0, 0.0         # if  k=0, no circuits measured
-        if base_circuit is None:
+        born = self.sampler == "born"
+        if born:
+            if state is None:
+                state = self._state(thetas, operator_indices)
+        elif base_circuit is None:
             base_circuit = self.ansatz_builder.build(thetas, operator_indices)
 
         g = 0.0
@@ -387,10 +420,18 @@ class MeasurementEngine:
             beta = float(beta)
             if beta == 0.0:
                 continue
-            inverse = self.previous_inverse(prev["thetas"], prev["ops"])
+            if born:
+                # <0^N|U_j^dag = <psi_j|: the previous state replaces U_j^dag.
+                previous_state = self._state(prev["thetas"], prev["ops"])
+            else:
+                inverse = self.previous_inverse(prev["thetas"], prev["ops"])
             for chain, t in self.penalty_terms(mu):
-                m, var_m = sampling.sample_penalty_term(
-                    base_circuit, inverse, chain, self.n_qubits, int(nshots))
+                if born:
+                    m, var_m = sampling.sample_penalty_term_from_states(
+                        state, previous_state, chain, self.n_qubits, int(nshots))
+                else:
+                    m, var_m = sampling.sample_penalty_term(
+                        base_circuit, inverse, chain, self.n_qubits, int(nshots))
                 self._count(1, nshots)
                 weight = 2 * beta * t
                 g += weight * m
@@ -427,7 +468,12 @@ class MeasurementEngine:
             raise ValueError(f"{len(previous_ansatze)} previous states and {len(betas)} betas.")
         penalty_nshots = int(nshots if penalty_nshots is None else penalty_nshots)
 
-        base = self.ansatz_builder.build(thetas, operator_indices)
+        # The ansatz (circuit or state) is obtained once and reused for every
+        # circuit of the scan.
+        if self.sampler == "born":
+            base, state = None, self._state(thetas, operator_indices)
+        else:
+            base, state = self.ansatz_builder.build(thetas, operator_indices), None
         nan = float("nan")
         measure_penalty = bool(previous_ansatze) and selection_criterion == "full_vqd"
 
@@ -441,13 +487,13 @@ class MeasurementEngine:
         for mu in candidates:
             mu = int(mu)
             g_energy[mu], e_energy[mu] = self.sampled_energy_gradient_with_error(
-                thetas, operator_indices, mu, nshots=nshots, base_circuit=base)
+                thetas, operator_indices, mu, nshots=nshots, base_circuit=base, state=state)
             if not previous_ansatze:
                 g_penalty[mu], e_penalty[mu] = 0.0, 0.0
             elif measure_penalty:
                 g_penalty[mu], e_penalty[mu] = self.sampled_penalty_gradient_with_error(
                     thetas, operator_indices, mu, previous_ansatze, betas,
-                    nshots=penalty_nshots, base_circuit=base)
+                    nshots=penalty_nshots, base_circuit=base, state=state)
             else:
                 g_penalty[mu], e_penalty[mu] = nan, nan
             g_total[mu] = g_energy[mu] + g_penalty[mu]
@@ -469,6 +515,10 @@ class MeasurementEngine:
                                  thetas_k: list[float], ops_k: list[int], *, nshots: int) -> float:
         """|<psi_i|psi_k>|^2 con el SWAP destructivo (seccion 16.2)."""
         self._count(1, nshots)
+        if self.sampler == "born":
+            return sampling.destructive_swap_overlap_from_states(
+                self._state(thetas_i, ops_i), self._state(thetas_k, ops_k),
+                self.n_qubits, int(nshots))
         return sampling.destructive_swap_overlap(
             self.ansatz_builder.build(thetas_i, ops_i),
             self.ansatz_builder.build(thetas_k, ops_k),

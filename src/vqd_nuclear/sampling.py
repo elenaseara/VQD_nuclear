@@ -37,6 +37,8 @@ import numpy as np
 from qibo import gates
 from qibo.models import Circuit
 
+from .measurement_plan import apply_circuit
+
 
 # =====================================================================
 # Traduccion de las puertas del plan a Qibo
@@ -221,15 +223,25 @@ def destructive_swap_overlap(circuit_i: Circuit, circuit_k: Circuit, n_qubits: i
     """
     n = int(n_qubits)
     result = destructive_swap_circuit(circuit_i, circuit_k, n)(nshots=int(nshots))
+    return swap_overlap_from_frequencies(result.frequencies(binary=True), n)
+
+
+def swap_overlap_from_frequencies(frequencies, n_qubits: int) -> float:
+    """Media de (-1)^(a.b) sobre los shots: el estimador del SWAP destructivo.
+
+    Las claves tienen 2N bits: los N primeros son el registro a (qubits 0..N-1)
+    y los N siguientes el registro b. Lo usan los dos muestreadores.
+    """
+    n = int(n_qubits)
     total = 0.0
     shots = 0
-    for key, counts in result.frequencies(binary=True).items():
+    for key, counts in frequencies.items():
         bits = bitstring_to_array(key, 2 * n)
         signo = -1.0 if int(np.sum(bits[:n] * bits[n:]) % 2) else 1.0
         total += signo * int(counts)
         shots += int(counts)
     if shots == 0:
-        raise RuntimeError("Qibo no devolvio ningun shot en el SWAP destructivo.")
+        raise RuntimeError("No shots in the destructive SWAP.")
     return float(total / shots)
 
 
@@ -321,10 +333,21 @@ def penalty_stats_from_frequencies(frequencies, n_qubits: int) -> tuple[float, f
                 n0 += counts
             else:
                 n1 += counts
+    return penalty_stats_from_counts(n0, n1, total)
+
+
+def penalty_stats_from_counts(n0: int, n1: int, total: int) -> tuple[float, float, int]:
+    """(m, var(m), n_shots) from n0 = #(a=0, x=0^N), n1 = #(a=1, x=0^N) and the
+    total number of shots. The estimator only depends on these three numbers.
+
+        m      = (n0 - n1) / n
+        Var(m) = ((n0 + n1)/n - m^2) / (n - 1)     (variance of the mean)
+    """
+    total = int(total)
     if total == 0:
-        raise RuntimeError("Qibo did not return any shot in the penalty circuit.")
-    m = (n0 - n1) / total
-    var = ((n0 + n1) / total - m * m) / (total - 1) if total > 1 else 0.0
+        raise RuntimeError("No shots in the penalty circuit.")
+    m = (int(n0) - int(n1)) / total
+    var = ((int(n0) + int(n1)) / total - m * m) / (total - 1) if total > 1 else 0.0
     return float(m), float(max(var, 0.0)), int(total)
     
 
@@ -349,3 +372,196 @@ def penalty_term_exact(base_circuit: Circuit, inverse_previous: Circuit, pauli_t
     p0, p1 = float(abs(state[0]) ** 2), float(abs(state[1]) ** 2)
     m = p0 - p1
     return m, max(p0 + p1 - m * m, 0.0)
+
+
+# =====================================================================
+# Muestreador por la regla de Born ("born"), alternativa a ejecutar en Qibo
+# =====================================================================
+#
+# QUE HACE. Para un circuito "prefijo U + sufijo V + medida final" Qibo simula
+# U y V sobre 2^N amplitudes, calcula P(x) y extrae nshots muestras de P. Aqui
+# se hace lo mismo, pero:
+#   - el estado del prefijo, |psi> = U|0>, lo da AnsatzBuilder.state (el MISMO
+#     circuito simulado en Qibo) y se reutiliza en todos los circuitos que lo
+#     comparten (todos los del plan de la energia, los de cada G_mu, ...);
+#   - el sufijo V (3-7 puertas del cambio de base) se aplica con
+#     measurement_plan.apply_circuit;
+#   - las cuentas de los nshots se extraen de golpe de una Multinomial(n, P).
+#
+# POR QUE ES LO MISMO. Las cuentas de n extracciones independientes de una
+# distribucion P siguen EXACTAMENTE una Multinomial(n, P) (es su definicion), y
+# los estimadores solo dependen de las cuentas. El algoritmo recibe el mismo
+# diccionario bitstring -> cuenta, con la misma ley de probabilidad, y los
+# circuitos y los shots que se contabilizan (usage) no cambian.
+#
+# REGLA: se reutilizan ESTADOS, nunca cuentas. Cada llamada extrae una muestra
+# nueva e independiente, como cada ejecucion en el hardware.
+#
+# Numeros aleatorios: los del generador global de NumPy (el que fija
+# np.random.seed en set_reproducible_seed), salvo que se pase `rng`.
+
+MAX_BORN_QUBITS = 28        # 2^28 amplitudes = 4 GB en complex128
+
+
+def _generator(rng):
+    return np.random if rng is None else rng
+
+
+def born_probabilities(state: np.ndarray, n_qubits: int, measured) -> np.ndarray:
+    """P(x) de los qubits `measured`, en ESE orden, sumando sobre el resto.
+
+    Indice de salida: measured[0] es el bit mas significativo, igual que las
+    claves de Qibo para gates.M(*measured). El qubit q del estado pesa
+    1 << (N - 1 - q) (convenio de Qibo y de apply_circuit).
+    """
+    n = int(n_qubits)
+    measured = [int(q) for q in measured]
+    if not measured:
+        raise ValueError("No measured qubits.")
+    if len(set(measured)) != len(measured) or not all(0 <= q < n for q in measured):
+        raise ValueError(f"Measured qubits {measured} not valid for N = {n}.")
+    if n > MAX_BORN_QUBITS:
+        raise ValueError(f"{n} qubits: 2^{n} amplitudes do not fit in memory.")
+    probs = np.abs(np.asarray(state).ravel()) ** 2
+    if probs.size != 2 ** n:
+        raise ValueError(f"State with {probs.size} amplitudes, expected 2^{n}.")
+    norm = float(probs.sum())
+    if not np.isfinite(norm) or abs(norm - 1.0) > 1e-8:
+        raise ValueError(f"State not normalized (norm^2 = {norm}).")
+    tensor = (probs / norm).reshape((2,) * n)
+    unmeasured = tuple(q for q in range(n) if q not in measured)
+    marginal = tensor.sum(axis=unmeasured) if unmeasured else tensor
+    # Tras sumar, los ejes que quedan estan en orden creciente de qubit.
+    in_order = sorted(measured)
+    marginal = np.transpose(marginal, [in_order.index(q) for q in measured]).reshape(-1)
+    return marginal / marginal.sum()
+
+
+def born_frequencies(state: np.ndarray, n_qubits: int, measured, nshots: int, *,
+                     rng=None) -> dict[str, int]:
+    """Cuentas de `nshots` medidas de `measured` sobre `state`: el mismo
+    diccionario {bitstring: cuenta} que result.frequencies(binary=True) de Qibo
+    para gates.M(*measured), con la misma ley (Multinomial(nshots, P))."""
+    probs = born_probabilities(state, n_qubits, measured)
+    counts = _generator(rng).multinomial(int(nshots), probs)
+    width = len(list(measured))
+    return {format(int(i), f"0{width}b"): int(counts[i]) for i in np.flatnonzero(counts)}
+
+
+def sample_group_stats_from_state(state: np.ndarray, group, nshots: int, n_qubits: int, *,
+                                  rng=None) -> tuple[float, float]:
+    """Como sample_group_stats, pero partiendo del estado del ansatz.
+
+    Aplica las puertas del grupo (V) a |psi> y mide `support`. Devuelve
+    (contribucion estimada, varianza de la media), con el mismo estimador.
+    """
+    if not group.support:
+        return 0.0, 0.0
+    phi = apply_circuit(state, group.gates, n_qubits) if group.gates else np.asarray(state).ravel()
+    frequencies = born_frequencies(phi, n_qubits, group.support, nshots, rng=rng)
+    average, var, n = stats_from_frquencies(group, frequencies)
+    return float(average), float(var / n)
+
+
+def sampled_expectation_with_error_from_state(plan, state: np.ndarray, nshots: int,
+                                              n_qubits: int, *, rng=None) -> tuple[float, float]:
+    """Como sampled_expectation_with_error, pero con el estado ya calculado:
+    identidad + suma de los grupos, y suma de varianzas (circuitos independientes)."""
+    value = complex(plan.identity).real
+    var_total = 0.0
+    for group in plan.all_groups():
+        m, v = sample_group_stats_from_state(state, group, nshots, n_qubits, rng=rng)
+        value += m
+        var_total += v
+    return float(value), float(np.sqrt(var_total))
+
+
+def _parity(values: np.ndarray) -> np.ndarray:
+    """Paridad del numero de bits a 1 de cada entero (int64, vectorizado)."""
+    v = np.array(values, dtype=np.int64, copy=True)
+    for shift in (32, 16, 8, 4, 2, 1):
+        v ^= v >> shift
+    return v & 1
+
+
+def apply_pauli_string(state: np.ndarray, pauli_term, n_qubits: int) -> np.ndarray:
+    """P|state> para una cadena de Pauli, vectorizado.
+
+    P|b> = i^(n_Y) (-1)^(paridad de b en los qubits con Y o Z) |b XOR m>, con m
+    los qubits con X o Y. Mismo convenio que apply_pauli_string_to_state
+    (measurements.py): Y|0> = i|1>, Y|1> = -i|0>.
+    """
+    n = int(n_qubits)
+    state = np.asarray(state, dtype=complex).ravel()
+    m_flip = m_sign = n_y = 0
+    for q, letter in pauli_term:
+        bit = 1 << (n - 1 - int(q))
+        letter = str(letter)
+        if letter == "X":
+            m_flip |= bit
+        elif letter == "Y":
+            m_flip |= bit
+            m_sign |= bit
+            n_y += 1
+        elif letter == "Z":
+            m_sign |= bit
+        elif letter != "I":
+            raise ValueError(f"Pauli operator not valid: {letter}")
+    index = np.arange(state.size, dtype=np.int64)
+    phase = (1j ** n_y) * (1 - 2 * _parity(index & m_sign))
+    out = np.empty_like(state)
+    out[index ^ m_flip] = phase * state
+    return out
+
+
+def penalty_probabilities_from_states(psi: np.ndarray, psi_previous: np.ndarray,
+                                      pauli_term, n_qubits: int) -> tuple[float, float]:
+    """(p0, p1) = P(a=0, x=0^N), P(a=1, x=0^N) del circuito de penalizacion.
+
+    Antes de U_j^dag el estado es 1/2 [|0>_a (I - iP)|psi> + |1>_a (I + iP)|psi>],
+    y <0^N|U_j^dag = <psi_j|. Con c = <psi_j|psi> y d = <psi_j|P psi>:
+        p0 = 1/4 |c - i d|^2,     p1 = 1/4 |c + i d|^2.
+    Una fase global en psi o en psi_j no cambia nada (|.|^2).
+    """
+    if not pauli_term:
+        raise ValueError("I chain does not add to the gradient -> not measured")
+    psi = np.asarray(psi, dtype=complex).ravel()
+    psi_previous = np.asarray(psi_previous, dtype=complex).ravel()
+    c = np.vdot(psi_previous, psi)
+    d = np.vdot(psi_previous, apply_pauli_string(psi, pauli_term, n_qubits))
+    return float(0.25 * abs(c - 1j * d) ** 2), float(0.25 * abs(c + 1j * d) ** 2)
+
+
+def sample_penalty_term_from_states(psi: np.ndarray, psi_previous: np.ndarray, pauli_term,
+                                    n_qubits: int, nshots: int, *, rng=None) -> tuple[float, float]:
+    """(m estimado, var(m)) del circuito de penalizacion, con `nshots` shots.
+
+    El estimador solo usa (n0, n1, n): se extraen de una
+    Multinomial(n; p0, p1, 1 - p0 - p1), que es su ley exacta. No se generan los
+    bitstrings de los shots con x != 0^N (se cuentan juntos en el tercer grupo).
+    """
+    p0, p1 = penalty_probabilities_from_states(psi, psi_previous, pauli_term, n_qubits)
+    rest = max(1.0 - p0 - p1, 0.0)
+    probs = np.array([p0, p1, rest]) / (p0 + p1 + rest)
+    n0, n1, _ = _generator(rng).multinomial(int(nshots), probs)
+    m, var, _ = penalty_stats_from_counts(n0, n1, int(nshots))
+    return m, var
+
+
+def destructive_swap_overlap_from_states(psi_i: np.ndarray, psi_k: np.ndarray, n_qubits: int,
+                                         nshots: int, *, rng=None) -> float:
+    """SWAP destructivo a partir de los dos estados: el mismo circuito de 2N qubits.
+
+    Registro a (qubits 0..N-1) = psi_i y registro b (N..2N-1) = psi_k, es decir
+    psi_i (x) psi_k. Se aplica la capa final (CNOT(q, q+N), H(q)), se miden los
+    2N qubits y se usa el mismo estimador que en Qibo. Ahorra simular los dos
+    ansatze sobre 2N qubits; sigue haciendo falta el vector de 2^(2N).
+    """
+    n = int(n_qubits)
+    if 2 * n > MAX_BORN_QUBITS:
+        raise ValueError(f"Destructive SWAP with 2N = {2 * n} qubits does not fit in memory.")
+    phi = np.kron(np.asarray(psi_i, dtype=complex).ravel(), np.asarray(psi_k, dtype=complex).ravel())
+    layer = [gate for q in range(n) for gate in (("CNOT", q, q + n), ("H", q))]
+    phi = apply_circuit(phi, layer, 2 * n)
+    frequencies = born_frequencies(phi, 2 * n, range(2 * n), nshots, rng=rng)
+    return swap_overlap_from_frequencies(frequencies, n)

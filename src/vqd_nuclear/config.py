@@ -50,6 +50,7 @@ class NumericalConfig:
     selection_criterion: str = "full_vqd"
     collect_gradient_diagnostics: bool = False
     use_model_space: bool = True
+    sampler: str = "qibo"
 
 
 @dataclass(slots=True)

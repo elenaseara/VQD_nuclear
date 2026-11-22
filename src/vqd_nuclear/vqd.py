@@ -97,6 +97,7 @@ def build_context(problem: ProblemConfig, run: RunConfig, numerical: NumericalCo
         available_workers=available_workers,
         measurement_strategy=numerical.measurement_strategy,
         model_space=model_space,
+        sampler=numerical.sampler,
     )
     
     active_operator_indices = list(range(len(hamiltonian.qubit_generator_pool)))
@@ -571,6 +572,8 @@ def run_workflow(problem: ProblemConfig, run: RunConfig, numerical: NumericalCon
     # same with use_model_space to create ModelSpaceEngine
     numerical_options.pop("measurement_strategy", None)
     numerical_options.pop("use_model_space", None)
+    # sampler configures MeasurementEngine, not the ADAPT loop.
+    numerical_options.pop("sampler", None)
 
     if run.run_statevector:
         statevector_results = run_vqd_family(context, cost_mode="statevector_exact", options=dict(numerical_options))

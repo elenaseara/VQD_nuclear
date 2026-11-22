@@ -115,6 +115,12 @@ def build_parser() -> argparse.ArgumentParser:
                             "g^E + g^penalty (full_vqd) or g^E (energy_only)."
                         ),
     )
+    parser.add_argument("--sampler", choices=["qibo", "born"], default="qibo",
+        help=("How the sampled route produces the shots (simulation only). 'qibo' "
+              "(default) runs every measurement circuit in Qibo. 'born' reuses the "
+              "ansatz state simulated in Qibo, applies the gates of each measurement "
+              "circuit to it and draws the counts from the Born rule: same "
+              "distribution of the counts, same circuits and shots counted."))
     parser.add_argument("--gradient-diagnostics", type=parse_bool, default=False,
         help="Stores, for each ADAPT iteration, the operator that would have"
             "been selected by using g^E alone, instead of g^E + g^penalty.")
@@ -196,7 +202,8 @@ def main() -> int:
         n_jobs=args.n_jobs,
         selection_criterion=args.selection_criterion,
         collect_gradient_diagnostics=args.gradient_diagnostics,
-        use_model_space=args.use_model_space
+        use_model_space=args.use_model_space,
+        sampler=args.sampler,
     )
     full_limits = FullQuantumLimits()
     if args.flat_results:
