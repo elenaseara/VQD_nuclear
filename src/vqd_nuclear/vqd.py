@@ -355,8 +355,8 @@ def run_adapt_vqd(context: VQDContext, *, previous_ansatze: list[dict[str, Any]]
     operator_indices: list[int] = []
     history: list[dict[str, Any]] = []
     max_layers = int(max_adapt_iter)
-    previous_objective: float | None = None
-    last_improvement: float | None = None
+    #previous_objective: float | None = None
+    #last_improvement: float | None = None
 
     diagnostics: list[Any] = []
     state_index = len(previous_ansatze)
@@ -471,25 +471,25 @@ def run_adapt_vqd(context: VQDContext, *, previous_ansatze: list[dict[str, Any]]
             operator_index,
             np.array2string(np.asarray(thetas), precision=6),
         )
-        if previous_objective is not None:
+        #if previous_objective is not None:
             # For excited-state VQD, the physical energy can increase while the
             # penalized objective decreases because the orthogonality penalty is
             # being reduced. Therefore convergence must be assessed with the
             # VQD objective, not with the physical energy alone. The
             # re-evaluated objective is used, not COBYLA's biased minimum.
-            last_improvement = float(previous_objective) - objective_reevaluated
+            #last_improvement = float(previous_objective) - objective_reevaluated
 
-        stagnant_objective = last_improvement is not None and last_improvement < float(energy_improvement_tol)
-        tiny_new_parameter = len(thetas) > 0 and abs(float(thetas[-1])) < float(new_theta_tol)
+        #stagnant_objective = last_improvement is not None and last_improvement < float(energy_improvement_tol)
+        #tiny_new_parameter = len(thetas) > 0 and abs(float(thetas[-1])) < float(new_theta_tol)
 
         # Do not stop only because the last theta is tiny: COBYLA and shot-based
         # objectives can return a near-zero new parameter before the existing
         # ansatz has fully relaxed. Require objective stagnation as well. (The
         # small-gradient stop is checked before adding the layer, above.)
-        if iteration > 0 and stagnant_objective and tiny_new_parameter:
-            termination_reason = "stagnant_objective_tiny_theta"
-            break
-        previous_objective = objective_reevaluated
+        #if iteration > 0 and stagnant_objective and tiny_new_parameter:
+        #    termination_reason = "stagnant_objective_tiny_theta"
+        #    break
+        #previous_objective = objective_reevaluated
 
     final_energy = evaluate_energy(context, thetas, operator_indices, cost_mode=cost_mode, energy_shots=energy_shots, n_jobs=workers)
     exact_target_energy = float(context.hamiltonian.exact_energies[state_index]) if len(context.hamiltonian.exact_energies) > state_index else np.nan
