@@ -187,7 +187,7 @@ def sampled_expectation(plan, base_circuit: Circuit, nshots: int, *,
 
 
 # =====================================================================
-# SWAP destructivo (seccion 16.2) — portado del legacy sin cambios de logica
+# SWAP destructivo (seccion 16.2) igual al legacy
 # =====================================================================
 
 def copy_gate_with_offset(gate: Any, offset: int) -> Any:
@@ -244,6 +244,69 @@ def swap_overlap_from_frequencies(frequencies, n_qubits: int) -> float:
         raise RuntimeError("No shots in the destructive SWAP.")
     return float(total / shots)
 
+# =====================================================================
+# Compute-Uncompute : alternative to SWAP for overlap comparison 
+# =====================================================================
+
+def compute_uncompute_circuit(circuit: Circuit, inverse_previous: Circuit, n_qubits: int,
+                              *, measure: bool = True) -> Circuit:
+    """
+    """
+    n = int(n_qubits)
+
+    if has_measurements(circuit) or has_measurements(inverse_previous):
+        raise ValueError("U or U_j cannot contain measurement gates")
+    for part in (circuit, inverse_previous):
+        if part.nqubits != n:
+            raise ValueError(f"Circuit with {part.nqubits} qubits, expected N = {n}.")
+
+    out = Circuit(n)
+    for gate in circuit.queue:                      # U|0^N>
+        out.add(copy_gate_with_offset(gate, 0))
+    for gate in inverse_previous.queue:             # U_j^dagger
+        out.add(copy_gate_with_offset(gate, 0))
+    if measure:
+        out.add(gates.M(*range(n)))
+    return out
+
+
+def compute_uncompute_stats_from_counts(n0: int, total: int) -> tuple[float, float, int]:
+    """(F, Var(F), n_shots) from n0 = #(x = 0^N) and the total number of shots.
+
+        F      = n0 / n
+        Var(F) = F (1 - F) / (n - 1)      (variance of the mean, ddof = 1)
+
+    Used by both samplers.
+    """
+    total = int(total)
+    n0 = int(n0)
+    if total == 0:
+        raise RuntimeError("No shots in the compute-uncompute circuit.")
+    if not 0 <= n0 <= total:
+        raise ValueError(f"n0 = {n0} out of range for {total} shots.")
+    f = n0 / total
+    var = f * (1.0 - f) / (total - 1) if total > 1 else 0.0
+    return float(f), float(var), total
+
+
+def compute_uncompute_stats_from_frequencies(frequencies, n_qubits: int) -> tuple[float, float, int]:
+    """(F, Var(F), n_shots) from Qibo frequencies of M(0, ..., N-1)."""
+    n = int(n_qubits)
+    n0 = 0
+    total = 0
+    for key, counts in frequencies.items():
+        if not bitstring_to_array(key, n).any():        # if x = 0^N
+            n0 += int(counts)
+        total += int(counts)
+    return compute_uncompute_stats_from_counts(n0, total)
+
+
+def compute_uncompute_overlap(circuit: Circuit, inverse_previous: Circuit, n_qubits: int,
+                              nshots: int) -> float:
+    """Estimate of |<psi_j|psi>|^2 with compute-uncompute. Only returns the overlap value)."""
+    result = compute_uncompute_circuit(circuit, inverse_previous, n_qubits)(nshots=int(nshots))
+    f, _, _ = compute_uncompute_stats_from_frequencies(result.frequencies(binary=True), n_qubits)
+    return f
 
 # =====================================================================
 # Gradiente de la penalizacion
@@ -565,3 +628,28 @@ def destructive_swap_overlap_from_states(psi_i: np.ndarray, psi_k: np.ndarray, n
     phi = apply_circuit(phi, layer, 2 * n)
     frequencies = born_frequencies(phi, 2 * n, range(2 * n), nshots, rng=rng)
     return swap_overlap_from_frequencies(frequencies, n)
+
+
+def compute_uncompute_overlap_from_states(psi: np.ndarray, psi_previous: np.ndarray, n_qubits: int,
+                                          nshots: int, *, rng=None) -> float:
+    """Compute-uncompute from the two states.
+
+    Before measuring, the state is U_j^dag|psi>, and its amplitude on 0^N is
+    <0^N|U_j^dag|psi> = <psi_j|psi>, so P(x = 0^N) = F = |<psi_j|psi>|^2.
+    The estimator only uses n0 = #(x = 0^N): (n0, n - n0) ~ Multinomial(n; F, 1 - F),
+    i.e. n0 ~ Binomial(n, F), its exact law. The bitstrings of the shots with
+    x != 0^N are not generated (they are counted together).
+    """
+    n = int(n_qubits)
+    psi = np.asarray(psi, dtype=complex).ravel()
+    psi_previous = np.asarray(psi_previous, dtype=complex).ravel()
+    for name, vector in (("psi", psi), ("psi_previous", psi_previous)):
+        if vector.size != 2 ** n:
+            raise ValueError(f"{name} with {vector.size} amplitudes, expected 2^{n}.")
+        norm = float(np.vdot(vector, vector).real)
+        if abs(norm - 1.0) > 1e-8:
+            raise ValueError(f"{name} not normalized (norm^2 = {norm}).")
+    f_exact = min(max(abs(np.vdot(psi_previous, psi)) ** 2, 0.0), 1.0)
+    n0 = _generator(rng).binomial(int(nshots), f_exact)
+    f, _, _ = compute_uncompute_stats_from_counts(n0, int(nshots))
+    return f

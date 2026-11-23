@@ -71,6 +71,7 @@ def build_summary_dataframe(results: list[dict[str, Any]], label: str, run_id: s
             "n_iterations": int(result.get("n_iterations", 0)),
             "n_layers": int(result.get("n_layers", 0)),
             "n_parameters": int(result.get("n_parameters", 0)),
+            "overlap_method": result.get("overlap_method", ""),
             "overlap_shots": int(result.get("overlap_shots", 0)),
             "energy_shots": int(result.get("energy_shots", 0)),
             "penalty_gradient_shots": int(result.get("penalty_gradient_shots", 0)),
@@ -302,6 +303,7 @@ def write_single_readable_txt_report(path: Path, *, run_id: str, context: "VQDCo
         f"First active operator: {context.reference.first_active_operator}",
         f"Beta check: {beta_check.get('message', '')}",
         f"Measurement strategy: {getattr(context.measurements, 'measurement_strategy', 'n/a')}",
+        f"Overlap method (sampled route): {getattr(context.measurements, 'overlap_method', 'n/a')}",
         f"Measurement circuits: {getattr(context.measurements, 'measurement_summary', 'n/a (planes diferidos)')}",
         f"Sampled-route usage (whole run): {getattr(context.measurements, 'usage', 'n/a')}",
     ]

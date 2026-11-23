@@ -96,7 +96,7 @@ class MeasurementEngine:
     """
     def __init__(self, *, ansatz_builder: "AnsatzBuilder", qubit_hamiltonian: Any,
                  n_qubits: int, available_workers: int, qubit_generator_pool=None, measurement_strategy: str = "paper", model_space=None,
-                 compression_fallback: bool = False, sampler: str = "qibo") -> None:
+                 compression_fallback: bool = False, sampler: str = "qibo", overlap_method: str = "swap") -> None:
         self.ansatz_builder = ansatz_builder
         self.qubit_hamiltonian = qubit_hamiltonian
         self.n_qubits = int(n_qubits)
@@ -121,6 +121,13 @@ class MeasurementEngine:
             raise ValueError("sampler must be 'qibo' or 'born'.")
         self.sampler = str(sampler)
 
+        # How the sampled route measures |<psi_j|psi>|^2 (see sampled_overlap):
+        #   "swap":              destructive SWAP, 2N qubits, per-shot variance 1 - F^2.
+        #   "compute_uncompute": U, then U_j^dag, N qubits, per-shot variance F(1 - F).
+        if overlap_method not in {"swap", "compute_uncompute"}:
+            raise ValueError("overlap_method must be 'swap' or 'compute_uncompute'.")
+        self.overlap_method = str(overlap_method)
+
         self._energy_cache: OrderedDict[tuple[tuple[float, ...], tuple[int, ...]], float] = OrderedDict()
         self.max_energy_cache_items = 128
 
@@ -132,7 +139,7 @@ class MeasurementEngine:
         self._gradient_operators = {}
         self._gradient_plans = {}
 
-        # For G_pen in sampled route: 
+        # For G_pen (and compute-uncompute overlap) in sampled route: 
         #  - Cache for U_j^dag for prev. states ord by (thetas, ops)
         #  - Store (P, t) of each generator (P != I and t != 0).
         self._inverse_cache: OrderedDict = OrderedDict()
@@ -525,7 +532,38 @@ class MeasurementEngine:
             self.n_qubits, int(nshots))
 
 
+    def compute_uncompute_overlap(self, thetas_i: list[float], ops_i: list[int],
+                                  thetas_k: list[float], ops_k: list[int], *, nshots: int) -> float:
+        """|<psi_i|psi_k>|^2 with compute-uncompute: U_k, then U_i^dag.
 
+        (i) is the previous state and (k) the current one. 
+        The inverse is taken from the previous state because it is fixed while the current
+        one is optimized, so U_i^dag is built once (previous_inverse cache, shared with g^pen).
+
+        The overlap is symmetric, swapping the arguments gives the same law;
+        only the cache would be less useful.
+        """
+        self._count(1, nshots)
+        if self.sampler == "born":
+            return sampling.compute_uncompute_overlap_from_states(
+                self._state(thetas_k, ops_k), self._state(thetas_i, ops_i),
+                self.n_qubits, int(nshots))
+        return sampling.compute_uncompute_overlap(
+            self.ansatz_builder.build(thetas_k, ops_k),
+            self.previous_inverse(thetas_i, ops_i),
+            self.n_qubits, int(nshots))
+
+
+    def sampled_overlap(self, thetas_i: list[float], ops_i: list[int],
+                        thetas_k: list[float], ops_k: list[int], *, nshots: int) -> float:
+        """|<psi_i|psi_k>|^2 with shots, using the engine's `overlap_method`.
+
+        (i) = previous state, (k) = current state. One circuit with `nshots`
+        shots is counted in `usage` with both methods.
+        """
+        if self.overlap_method == "compute_uncompute":
+            return self.compute_uncompute_overlap(thetas_i, ops_i, thetas_k, ops_k, nshots=nshots)
+        return self.destructive_swap_overlap(thetas_i, ops_i, thetas_k, ops_k, nshots=nshots)
 
 
     ####################################################################################

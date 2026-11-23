@@ -51,6 +51,7 @@ class NumericalConfig:
     collect_gradient_diagnostics: bool = False
     use_model_space: bool = True
     sampler: str = "qibo"
+    overlap_method: str = "swap"
 
 
 @dataclass(slots=True)

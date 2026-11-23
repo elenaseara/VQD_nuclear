@@ -98,6 +98,7 @@ def build_context(problem: ProblemConfig, run: RunConfig, numerical: NumericalCo
         measurement_strategy=numerical.measurement_strategy,
         model_space=model_space,
         sampler=numerical.sampler,
+        overlap_method=numerical.overlap_method,
     )
     
     active_operator_indices = list(range(len(hamiltonian.qubit_generator_pool)))
@@ -160,7 +161,7 @@ def vqd_cost(
         overlap_fn = lambda previous: context.measurements.exact_overlap(previous["thetas"], previous["ops"], thetas, operator_indices)
     elif cost_mode == "full_quantum_circuit":
         energy = context.measurements.sampled_energy(thetas, operator_indices, nshots=energy_shots, n_jobs=n_jobs)
-        overlap_fn = lambda previous: context.measurements.destructive_swap_overlap(previous["thetas"], previous["ops"], thetas, operator_indices, nshots=overlap_shots)
+        overlap_fn = lambda previous: context.measurements.sampled_overlap(previous["thetas"], previous["ops"], thetas, operator_indices, nshots=overlap_shots)
     else:
         raise ValueError("cost_mode must be 'statevector_exact' or 'full_quantum_circuit'.")
 
@@ -325,7 +326,7 @@ def compute_previous_overlaps(context: VQDContext, thetas: list[float], operator
     if cost_mode == "statevector_exact":
         one_overlap = lambda previous: context.measurements.exact_overlap(previous["thetas"], previous["ops"], thetas, operator_indices)
     else:
-        one_overlap = lambda previous: context.measurements.destructive_swap_overlap(previous["thetas"], previous["ops"], thetas, operator_indices, nshots=overlap_shots)
+        one_overlap = lambda previous: context.measurements.sampled_overlap(previous["thetas"], previous["ops"], thetas, operator_indices, nshots=overlap_shots)
     return parallel_map(one_overlap, previous_ansatze, n_jobs=n_jobs, available_workers=context.available_workers)
 
 
@@ -506,6 +507,8 @@ def run_adapt_vqd(context: VQDContext, *, previous_ansatze: list[dict[str, Any]]
         "n_parameters": int(len(thetas)),
         "cost_mode": str(cost_mode),
         "gradient_method": str(gradient_method),
+        "overlap_method": (str(context.measurements.overlap_method)
+                           if cost_mode == "full_quantum_circuit" else "exact"),
         "overlap_shots": int(overlap_shots),
         "energy_shots": int(energy_shots),
         "penalty_gradient_shots": int(penalty_gradient_shots),
@@ -572,8 +575,9 @@ def run_workflow(problem: ProblemConfig, run: RunConfig, numerical: NumericalCon
     # same with use_model_space to create ModelSpaceEngine
     numerical_options.pop("measurement_strategy", None)
     numerical_options.pop("use_model_space", None)
-    # sampler configures MeasurementEngine, not the ADAPT loop.
+    # sampler and overlap_method configure MeasurementEngine, not the ADAPT loop.
     numerical_options.pop("sampler", None)
+    numerical_options.pop("overlap_method", None)
 
     if run.run_statevector:
         statevector_results = run_vqd_family(context, cost_mode="statevector_exact", options=dict(numerical_options))

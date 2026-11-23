@@ -51,7 +51,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Objective-evaluation route. Use statevector_exact for exact simulator energies/overlaps, "
-            "full_quantum_circuit for sampled Pauli energies and destructive-SWAP overlaps, or both. "
+            "full_quantum_circuit for sampled Pauli energies and sampled overlaps, or both. "
             "If omitted, the legacy --statevector and --full-quantum-circuit flags are used."
         ),
     )
@@ -121,6 +121,11 @@ def build_parser() -> argparse.ArgumentParser:
               "ansatz state simulated in Qibo, applies the gates of each measurement "
               "circuit to it and draws the counts from the Born rule: same "
               "distribution of the counts, same circuits and shots counted."))
+    parser.add_argument("--overlap-method", choices=["swap", "compute_uncompute"], default="swap",
+        help=("How full_quantum_circuit measures |<psi_j|psi>|^2. 'swap' (default): "
+              "destructive SWAP on 2N qubits, per-shot variance 1 - F^2. "
+              "'compute_uncompute': U, then U_j^dag, on N qubits, "
+              "per-shot variance F(1 - F). Ignored by statevector_exact."))
     parser.add_argument("--gradient-diagnostics", type=parse_bool, default=False,
         help="Stores, for each ADAPT iteration, the operator that would have"
             "been selected by using g^E alone, instead of g^E + g^penalty.")
@@ -204,6 +209,7 @@ def main() -> int:
         collect_gradient_diagnostics=args.gradient_diagnostics,
         use_model_space=args.use_model_space,
         sampler=args.sampler,
+        overlap_method=args.overlap_method,
     )
     full_limits = FullQuantumLimits()
     if args.flat_results:
