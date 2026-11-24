@@ -35,6 +35,7 @@ class NumericalConfig:
 
     max_adapt_iter: int = 20
     grad_tol: float = 5e-4
+    noise_sigmas: float = 3.0       # small-gradient stop: |g| < max(grad_tol, noise_sigmas * sigma_g)
     max_candidates: int | None = None
     optimizer_maxiter: int = 1500
     cobyla_rhobeg: float = 0.03
@@ -42,8 +43,8 @@ class NumericalConfig:
     overlap_shots: int = 200000
     energy_shots: int = 200000
     penalty_gradient_shots: int | None = None   # sampled route only (None = energy_shots)
-    new_theta_tol: float = 1e-3
     energy_improvement_tol: float = 1e-4
+    stagnation_patience: int = 2
     gradient_method: str = "analytic"
     measurement_strategy: str = "paper"
     n_jobs: int | str = "all"

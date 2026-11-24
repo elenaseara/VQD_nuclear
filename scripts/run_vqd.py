@@ -69,6 +69,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--max-adapt-iter", type=int, default=20)
     parser.add_argument("--grad-tol", type=float, default=5e-4)
+    parser.add_argument("--noise-sigmas", type=parse_non_negative_float, default=3.0,
+        help=("Number of standard errors k of the noise-aware stops. ADAPT stops "
+              "when |g_selected| < max(grad-tol, k * sigma_g), with sigma_g the "
+              "standard error of the selected gradient estimated from the shots "
+              "(full_quantum_circuit), and an objective improvement only counts if "
+              "dF >= max(energy-improvement-tol, k * sigma_dF) Without shot noise (statevector_exact) "
+              "the threshold is grad-tol. 0 recovers the plain grad-tol test."))
     parser.add_argument("--max-candidates", type=int, default=None)
     parser.add_argument("--optimizer-maxiter", type=int, default=1500)
     parser.add_argument("--cobyla-rhobeg", type=float, default=0.03,
@@ -81,8 +88,15 @@ def build_parser() -> argparse.ArgumentParser:
         help=("Shots per penalty-gradient circuit in full_quantum_circuit (one circuit "
               "per previous state and Pauli string of each candidate). "
               "Default: the value of --energy-shots. Ignored by statevector_exact."))
-    parser.add_argument("--new-theta-tol", type=float, default=1e-3)
-    parser.add_argument("--energy-improvement-tol", type=float, default=1e-4)
+    #parser.add_argument("--new-theta-tol", type=float, default=1e-3)
+    parser.add_argument("--energy-improvement-tol", type=parse_non_negative_float, default=1e-4,
+        help=("Minimum improvement of the re-evaluated VQD objective between "
+              "consecutive layers. A layer improves significantly if "
+              "dF >= max(tau_F, k * sigma_dF), with k = --noise-sigmas and sigma_dF "
+              "estimated from the shots (0 in statevector_exact)."))
+    parser.add_argument("--stagnation-patience", type=parse_positive_int, default=2,
+        help=("Stop ADAPT after this many consecutive layers without a significant "
+              "improvement of the objective."))
     parser.add_argument(
         "--gradient-method",
         choices=["analytic", "finite_difference"],
@@ -193,6 +207,7 @@ def main() -> int:
     numerical = NumericalConfig(
         max_adapt_iter=args.max_adapt_iter,
         grad_tol=args.grad_tol,
+        noise_sigmas=args.noise_sigmas,
         max_candidates=args.max_candidates,
         optimizer_maxiter=args.optimizer_maxiter,
         cobyla_rhobeg=args.cobyla_rhobeg,
@@ -200,8 +215,8 @@ def main() -> int:
         overlap_shots=args.overlap_shots,
         energy_shots=args.energy_shots,
         penalty_gradient_shots=args.penalty_gradient_shots,
-        new_theta_tol=args.new_theta_tol,
         energy_improvement_tol=args.energy_improvement_tol,
+        stagnation_patience=args.stagnation_patience,
         gradient_method=args.gradient_method,
         measurement_strategy=args.measurement_strategy,
         n_jobs=args.n_jobs,
@@ -247,6 +262,17 @@ def parse_positive_int(value: str) -> int:
         raise argparse.ArgumentTypeError(f"expected a positive integer, got {value!r}")
     if number < 1:
         raise argparse.ArgumentTypeError(f"expected a positive integer, got {number}")
+    return number
+
+
+def parse_non_negative_float(value: str) -> float:
+    """Parse a finite float >= 0 (a number of standard errors)."""
+    try:
+        number = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected a number >= 0, got {value!r}")
+    if not (number >= 0.0 and number != float("inf")):
+        raise argparse.ArgumentTypeError(f"expected a finite number >= 0, got {number}")
     return number
 
 

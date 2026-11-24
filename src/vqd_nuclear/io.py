@@ -66,6 +66,7 @@ def build_summary_dataframe(results: list[dict[str, Any]], label: str, run_id: s
             "state": int(result.get("state_index", len(rows))),
             "exact_energy": float(result.get("exact_energy", np.nan)),
             "computed_energy": float(result.get("energy", np.nan)),
+            "computed_energy_stderr": float(result.get("energy_stderr", np.nan)),
             "signed_error": float(result.get("energy_error", np.nan)),
             "abs_error": float(result.get("abs_energy_error", np.nan)),
             "n_iterations": int(result.get("n_iterations", 0)),
@@ -81,6 +82,11 @@ def build_summary_dataframe(results: list[dict[str, Any]], label: str, run_id: s
             "max_adapt_iter": int(result.get("max_adapt_iter", 0)),
             "max_candidates": result.get("max_candidates", None),
             "grad_tol": float(result.get("grad_tol", np.nan)),
+            "noise_sigmas": float(result.get("noise_sigmas", np.nan)),
+            "stop_gradient_threshold": float(np.nan if result.get("stop_gradient_threshold") is None
+                                             else result["stop_gradient_threshold"]),
+            "energy_improvement_tol": float(result.get("energy_improvement_tol", np.nan)),
+            "stagnation_patience": int(result.get("stagnation_patience", 0)),
             "operators": as_clean_string(result.get("ops", []), precision=0),
             "thetas": as_clean_string(result.get("thetas", []), precision=12),
             "selection_criterion": result.get("selection_criterion", ""),
@@ -230,6 +236,8 @@ def build_history_dataframe(results: list[dict[str, Any]], label: str, run_id: s
             row["method"] = label
             row["state"] = state_index
             row["overlaps_with_previous"] = as_clean_string(row.get("overlaps_with_previous", []), precision=8)
+            if "overlaps_with_previous_stderr" in row:
+                row["overlaps_with_previous_stderr"] = as_clean_string(row["overlaps_with_previous_stderr"], precision=4)
             if "ops" in row:
                 row["ops"] = as_clean_string(row["ops"], precision=0)
             if "thetas" in row:

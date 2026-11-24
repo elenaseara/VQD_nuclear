@@ -542,52 +542,85 @@ class MeasurementEngine:
         )
     
 
-    def destructive_swap_overlap(self, thetas_i: list[float], ops_i: list[int],
-                                 thetas_k: list[float], ops_k: list[int], *, nshots: int) -> float:
-        """|<psi_i|psi_k>|^2 con el SWAP destructivo (seccion 16.2)."""
+    def destructive_swap_overlap_with_error(self, thetas_i: list[float], ops_i: list[int],
+                                            thetas_k: list[float], ops_k: list[int], *,
+                                            nshots: int) -> tuple[float, float]:
+        """(|<psi_i|psi_k>|^2, standard error) with the destructive SWAP.
+
+        Standard error sqrt((1 - F^2) / (n - 1)), from the shots themselves.
+        """
         self._count(1, nshots)
         if self.sampler == "born":
-            return sampling.destructive_swap_overlap_from_states(
+            return sampling.destructive_swap_overlap_with_error_from_states(
                 self._state(thetas_i, ops_i), self._state(thetas_k, ops_k),
                 self.n_qubits, int(nshots))
-        return sampling.destructive_swap_overlap(
+        return sampling.destructive_swap_overlap_with_error(
             self.ansatz_builder.build(thetas_i, ops_i),
             self.ansatz_builder.build(thetas_k, ops_k),
             self.n_qubits, int(nshots))
 
 
-    def compute_uncompute_overlap(self, thetas_i: list[float], ops_i: list[int],
-                                  thetas_k: list[float], ops_k: list[int], *, nshots: int) -> float:
-        """|<psi_i|psi_k>|^2 with compute-uncompute: U_k, then U_i^dag.
+    def destructive_swap_overlap(self, thetas_i: list[float], ops_i: list[int],
+                                 thetas_k: list[float], ops_k: list[int], *, nshots: int) -> float:
+        """|<psi_i|psi_k>|^2 con el SWAP destructivo (seccion 16.2)."""
+        f, _ = self.destructive_swap_overlap_with_error(thetas_i, ops_i, thetas_k, ops_k,
+                                                        nshots=nshots)
+        return f
 
-        (i) is the previous state and (k) the current one. 
+
+    def compute_uncompute_overlap_with_error(self, thetas_i: list[float], ops_i: list[int],
+                                             thetas_k: list[float], ops_k: list[int], *,
+                                             nshots: int) -> tuple[float, float]:
+        """(|<psi_i|psi_k>|^2, standard error) with compute-uncompute: U_k, then U_i^dag.
+
+        (i) is the previous state and (k) the current one.
         The inverse is taken from the previous state because it is fixed while the current
         one is optimized, so U_i^dag is built once (previous_inverse cache, shared with g^pen).
 
         The overlap is symmetric, swapping the arguments gives the same law;
         only the cache would be less useful.
+
+        Standard error sqrt(F (1 - F) / (n - 1)), from the shots themselves.
         """
         self._count(1, nshots)
         if self.sampler == "born":
-            return sampling.compute_uncompute_overlap_from_states(
+            return sampling.compute_uncompute_overlap_with_error_from_states(
                 self._state(thetas_k, ops_k), self._state(thetas_i, ops_i),
                 self.n_qubits, int(nshots))
-        return sampling.compute_uncompute_overlap(
+        return sampling.compute_uncompute_overlap_with_error(
             self.ansatz_builder.build(thetas_k, ops_k),
             self.previous_inverse(thetas_i, ops_i),
             self.n_qubits, int(nshots))
 
 
-    def sampled_overlap(self, thetas_i: list[float], ops_i: list[int],
-                        thetas_k: list[float], ops_k: list[int], *, nshots: int) -> float:
-        """|<psi_i|psi_k>|^2 with shots, using the engine's `overlap_method`.
+    def compute_uncompute_overlap(self, thetas_i: list[float], ops_i: list[int],
+                                  thetas_k: list[float], ops_k: list[int], *, nshots: int) -> float:
+        """|<psi_i|psi_k>|^2 with compute-uncompute (value only)."""
+        f, _ = self.compute_uncompute_overlap_with_error(thetas_i, ops_i, thetas_k, ops_k,
+                                                         nshots=nshots)
+        return f
+
+
+    def sampled_overlap_with_error(self, thetas_i: list[float], ops_i: list[int],
+                                   thetas_k: list[float], ops_k: list[int], *,
+                                   nshots: int) -> tuple[float, float]:
+        """(|<psi_i|psi_k>|^2, standard error) with shots, using `overlap_method`.
 
         (i) = previous state, (k) = current state. One circuit with `nshots`
         shots is counted in `usage` with both methods.
         """
         if self.overlap_method == "compute_uncompute":
-            return self.compute_uncompute_overlap(thetas_i, ops_i, thetas_k, ops_k, nshots=nshots)
-        return self.destructive_swap_overlap(thetas_i, ops_i, thetas_k, ops_k, nshots=nshots)
+            return self.compute_uncompute_overlap_with_error(
+                thetas_i, ops_i, thetas_k, ops_k, nshots=nshots)
+        return self.destructive_swap_overlap_with_error(
+            thetas_i, ops_i, thetas_k, ops_k, nshots=nshots)
+
+
+    def sampled_overlap(self, thetas_i: list[float], ops_i: list[int],
+                        thetas_k: list[float], ops_k: list[int], *, nshots: int) -> float:
+        """|<psi_i|psi_k>|^2 with shots, using the engine's `overlap_method` (value only)."""
+        f, _ = self.sampled_overlap_with_error(thetas_i, ops_i, thetas_k, ops_k, nshots=nshots)
+        return f
 
 
     ####################################################################################
@@ -678,4 +711,4 @@ class CandidateGradientScan:
     # None for statevector, NaN if not measured.
     g_energy_stderr: dict[int, float] | None = None
     g_penalty_stderr: dict[int, float] | None = None
-    g_total_stderr: dict[int, float] | None = None
+    g_total_stderr: dict[int, float] | None = None

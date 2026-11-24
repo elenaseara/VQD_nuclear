@@ -218,6 +218,35 @@ def selection_stderr(scan, selection_criterion: str, operator_index: int) -> flo
     return float(errors[int(operator_index)])
 
 
+def gradient_stop_threshold(grad_tol: float, noise_sigmas: float,
+                            gradient_stderr: float | None) -> float:
+    """Threshold of the small-gradient stop: max(grad_tol, k * sigma_g)."""
+    if gradient_stderr is None or not np.isfinite(gradient_stderr):
+        return float(grad_tol)
+    return max(float(grad_tol), float(noise_sigmas) * float(gradient_stderr))
+
+
+def objective_improvement_test(previous_objective: float, previous_stderr: float,
+                               objective: float, objective_stderr: float, *,
+                               improvement_tol: float, noise_sigmas: float) -> dict[str, Any]:
+    """Check if the improvement of the re-evaluated objective between two consecutive
+    layers is significant
+
+        dF       = F_previous - F_current
+        sigma_dF = sqrt(sigma_previous^2 + sigma_current^2)
+        significant  <=>  dF >= max(improvement_tol, noise_sigmas * sigma_dF)
+
+    The two re-evaluations use independent shots, so their variances add.
+    A negative dF (the objective went up) is never significant. Without shot
+    noise (statevector, sigmas 0) the threshold is improvement_tol.
+    """
+    improvement = float(previous_objective) - float(objective)
+    stderr = float(np.hypot(float(previous_stderr), float(objective_stderr)))
+    threshold = max(float(improvement_tol), float(noise_sigmas) * stderr)
+    return {"improvement": improvement, "stderr": stderr, "threshold": threshold,
+            "significant": bool(improvement >= threshold)}
+
+
 def select_next_operator(context: VQDContext, thetas: list[float], operator_indices: list[int],
                           previous_ansatze: list[dict[str, Any]], betas: list[float], *, eps: float,
                           max_candidates: int | None, n_jobs: int | str | None, overlap_shots: int, energy_shots: int,
@@ -321,31 +350,76 @@ def optimize_ansatz(context: VQDContext, thetas: list[float], operator_indices: 
     return list(result.x), float(result.fun), result
 
 
+def compute_previous_overlaps_with_error(context: VQDContext, thetas: list[float], operator_indices: list[int],
+                                         previous_ansatze: list[dict[str, Any]], *, n_jobs: int | str | None,
+                                         cost_mode: str, overlap_shots: int) -> list[tuple[float, float]]:
+    """[(overlap, standard error)] with every previous state.
+
+    Sampled route: standard error estimated from the shots of each overlap
+    circuit (see MeasurementEngine.sampled_overlap_with_error). Statevector:
+    exact overlaps, standard error 0.
+    """
+    if cost_mode == "statevector_exact":
+        one_overlap = lambda previous: (context.measurements.exact_overlap(previous["thetas"], previous["ops"], thetas, operator_indices), 0.0)
+    else:
+        one_overlap = lambda previous: context.measurements.sampled_overlap_with_error(previous["thetas"], previous["ops"], thetas, operator_indices, nshots=overlap_shots)
+    return parallel_map(one_overlap, previous_ansatze, n_jobs=n_jobs, available_workers=context.available_workers)
+
+
 def compute_previous_overlaps(context: VQDContext, thetas: list[float], operator_indices: list[int], previous_ansatze: list[dict[str, Any]], *, n_jobs: int | str | None, cost_mode: str, overlap_shots: int) -> list[float]:
     """Compute overlaps with previous states using the selected overlap method."""
-    if cost_mode == "statevector_exact":
-        one_overlap = lambda previous: context.measurements.exact_overlap(previous["thetas"], previous["ops"], thetas, operator_indices)
-    else:
-        one_overlap = lambda previous: context.measurements.sampled_overlap(previous["thetas"], previous["ops"], thetas, operator_indices, nshots=overlap_shots)
-    return parallel_map(one_overlap, previous_ansatze, n_jobs=n_jobs, available_workers=context.available_workers)
+    pairs = compute_previous_overlaps_with_error(context, thetas, operator_indices, previous_ansatze,
+                                                 n_jobs=n_jobs, cost_mode=cost_mode, overlap_shots=overlap_shots)
+    return [value for value, _ in pairs]
+
+
+def evaluate_energy_with_error(context: VQDContext, thetas: list[float], operator_indices: list[int], *,
+                               cost_mode: str, energy_shots: int) -> tuple[float, float]:
+    """(physical energy, standard error). The error is 0 in the statevector route."""
+    if cost_mode == "full_quantum_circuit":
+        return context.measurements.sampled_energy_with_error(thetas, operator_indices, nshots=energy_shots)
+    return context.measurements.statevector_energy(thetas, operator_indices), 0.0
 
 
 def evaluate_energy(context: VQDContext, thetas: list[float], operator_indices: list[int], *, cost_mode: str, energy_shots: int, n_jobs: int | str | None) -> float:
     """Evaluate the physical energy in the requested mode."""
-    if cost_mode == "full_quantum_circuit":
-        return context.measurements.sampled_energy(thetas, operator_indices, nshots=energy_shots, n_jobs=n_jobs)
-    return context.measurements.statevector_energy(thetas, operator_indices)
+    del n_jobs
+    energy, _ = evaluate_energy_with_error(context, thetas, operator_indices,
+                                           cost_mode=cost_mode, energy_shots=energy_shots)
+    return energy
+
+
+def objective_with_error(energy: float, energy_stderr: float, overlaps: list[float],
+                         overlap_stderrs: list[float], betas: list[float]) -> tuple[float, float]:
+    """(F, sigma_F) of the VQD objective F = E + sum_j beta_j |<psi_j|psi>|^2.
+
+    E and the overlaps are measured in independent circuits, so
+        sigma_F^2 = sigma_E^2 + sum_j beta_j^2 sigma_j^2.
+    F is computed with the same expression as before (bitwise identical).
+    """
+    value = float(energy) + float(np.sum(
+        [float(beta) * float(overlap) for beta, overlap in zip(betas, overlaps)]))
+    variance = float(energy_stderr) ** 2 + float(np.sum(
+        [(float(beta) * float(err)) ** 2 for beta, err in zip(betas, overlap_stderrs)]))
+    return value, float(np.sqrt(variance))
 
 
 def run_adapt_vqd(context: VQDContext, *, previous_ansatze: list[dict[str, Any]] | None = None, betas: list[float] | None = None,
                   max_adapt_iter: int = 20, grad_tol: float = 2e-4, max_candidates: int | None = None, n_jobs: int | str | None = None,
                   overlap_shots: int = 200000, energy_shots: int = 200000, optimizer_maxiter: int = 200, cobyla_rhobeg: float=0.03,
-                  cobyla_rhoend: float = 5e-3, new_theta_tol: float = 1e-3, energy_improvement_tol: float = 1e-4,
+                  cobyla_rhoend: float = 5e-3, energy_improvement_tol: float = 1e-4,
                   cost_mode: str = "statevector_exact", gradient_method: str = "analytic", selection_criterion: str = "full_vqd",
                   collect_gradient_diagnostics: bool = False, store_history: bool = True,
-                  penalty_gradient_shots: int | None = None,
+                  penalty_gradient_shots: int | None = None, noise_sigmas: float = 3.0,
+                  stagnation_patience: int = 2,
                   ) -> dict[str, Any]:
     """Run ADAPT-VQD for one state."""
+    if not float(noise_sigmas) >= 0.0:
+        raise ValueError(f"noise_sigmas must be >= 0, got {noise_sigmas}.")
+    if isinstance(stagnation_patience, bool) or int(stagnation_patience) != stagnation_patience \
+            or int(stagnation_patience) < 1:
+        raise ValueError(f"stagnation_patience must be an integer >= 1, got {stagnation_patience}.")
+    stagnation_patience = int(stagnation_patience)
     previous_ansatze = previous_ansatze or []
     betas = betas or []
     penalty_gradient_shots = int(energy_shots if penalty_gradient_shots is None else penalty_gradient_shots)
@@ -355,14 +429,17 @@ def run_adapt_vqd(context: VQDContext, *, previous_ansatze: list[dict[str, Any]]
     operator_indices: list[int] = []
     history: list[dict[str, Any]] = []
     max_layers = int(max_adapt_iter)
-    #previous_objective: float | None = None
-    #last_improvement: float | None = None
+    previous_objective: float | None = None
+    previous_objective_stderr: float | None = None
+    stagnant_layers = 0
 
     diagnostics: list[Any] = []
     state_index = len(previous_ansatze)
     # Why the loop ended. Overwritten by every early exit below.
     termination_reason = "max_adapt_iter"
     stop_gradient: float | None = None
+    stop_gradient_stderr: float | None = None
+    stop_gradient_threshold: float | None = None
 
     for iteration in range(max_layers):
         operator_index, gradient, scan = select_next_operator(
@@ -386,12 +463,17 @@ def run_adapt_vqd(context: VQDContext, *, previous_ansatze: list[dict[str, Any]]
             break
 
         # Stop BEFORE adding the operator if its gradient is already below
-        # grad_tol. Checking it after optimizing (as before) cost a full
-        # optimization of a layer that ends with theta ~ 0. The first iteration
-        # always adds a layer, as before.
-        if iteration > 0 and abs(float(gradient)) < float(grad_tol):
+        # threshold max(grad_tol, k * sigma_g). Checking it after optimizing
+        # (as before) cost a full optimization of a layer that ends with
+        # theta ~ 0. The first iteration always adds a layer, as before.
+
+        gradient_stderr = None if scan is None else selection_stderr(scan, selection_criterion, operator_index)
+        threshold = gradient_stop_threshold(grad_tol, noise_sigmas, gradient_stderr)
+        if iteration > 0 and abs(float(gradient)) < threshold:
             termination_reason = "small_gradient"
             stop_gradient = float(gradient)
+            stop_gradient_stderr = gradient_stderr
+            stop_gradient_threshold = threshold
             break
 
         diagnostic = None
@@ -417,27 +499,53 @@ def run_adapt_vqd(context: VQDContext, *, previous_ansatze: list[dict[str, Any]]
             n_jobs=workers,
             cost_mode=cost_mode,
         )
-        energy = evaluate_energy(context, thetas, operator_indices, cost_mode=cost_mode, energy_shots=energy_shots, n_jobs=workers)
-        overlaps = compute_previous_overlaps(context, thetas, operator_indices, previous_ansatze, n_jobs=workers, cost_mode=cost_mode, overlap_shots=overlap_shots)
+        energy, energy_stderr = evaluate_energy_with_error(
+            context, thetas, operator_indices, cost_mode=cost_mode, energy_shots=energy_shots)
+        overlap_pairs = compute_previous_overlaps_with_error(
+            context, thetas, operator_indices, previous_ansatze, n_jobs=workers,
+            cost_mode=cost_mode, overlap_shots=overlap_shots)
+        overlaps = [value for value, _ in overlap_pairs]
+        overlap_stderrs = [err for _, err in overlap_pairs]
         # Objective re-evaluated at the returned thetas with the energy and
         # overlaps just measured. In the sampled route objective_value is the
         # minimum COBYLA found among noisy evaluations, which is biased low;
         # this one is an independent estimate. In statevector both coincide.
-        objective_reevaluated = float(energy) + float(np.sum(
-            [float(beta) * float(overlap) for beta, overlap in zip(betas, overlaps)]))
+        # Its standard error comes from the shots of these same circuits.
+        objective_reevaluated, objective_stderr = objective_with_error(
+            energy, energy_stderr, overlaps, overlap_stderrs, betas)
+        # For excited-state VQD the physical energy can go up
+        # while the penalized objective goes down (the orthogonality penalty is
+        # being reduced), so convergence is assessed with the VQD objective, and
+        # with the re-evaluated one.
+        improvement = None
+        if previous_objective is not None:
+            improvement = objective_improvement_test(
+                previous_objective, previous_objective_stderr,
+                objective_reevaluated, objective_stderr,
+                improvement_tol=energy_improvement_tol, noise_sigmas=noise_sigmas)
+            stagnant_layers = 0 if improvement["significant"] else stagnant_layers + 1
+        previous_objective, previous_objective_stderr = objective_reevaluated, objective_stderr
         exact_target_energy = float(context.hamiltonian.exact_energies[state_index]) if len(context.hamiltonian.exact_energies) > state_index else np.nan
         energy_error = float(energy - exact_target_energy) if np.isfinite(exact_target_energy) else np.nan
         record = {
             "iteration": int(iteration),
             "selected_operator": int(operator_index),
             "adapt_gradient": float(gradient),  #score used to select, g_total with full_vqd, g^E with energy_only).
-            "adapt_gradient_stderr": (None if scan is None
-                                      else selection_stderr(scan, selection_criterion, operator_index)),
+            "adapt_gradient_stderr": gradient_stderr,
+            # Threshold the gradient was compared with
+            "gradient_stop_threshold": float(threshold),
             "selected_g_energy": None if scan is None else float(scan.g_energy[operator_index]),
             "selected_g_penalty": None if scan is None else float(scan.g_penalty[operator_index]),
             "physical_energy": float(energy),
+            "physical_energy_stderr": float(energy_stderr),
             "vqd_objective": float(objective_value),
             "vqd_objective_reevaluated": objective_reevaluated,
+            "vqd_objective_reevaluated_stderr": float(objective_stderr),
+            "objective_improvement": None if improvement is None else improvement["improvement"],
+            "objective_improvement_stderr": None if improvement is None else improvement["stderr"],
+            "objective_improvement_threshold": None if improvement is None else improvement["threshold"],
+            "significant_improvement": None if improvement is None else improvement["significant"],
+            "stagnant_layers": int(stagnant_layers),
             "exact_target_energy": exact_target_energy,
             "energy_error": energy_error,
             "abs_energy_error": abs(energy_error) if np.isfinite(energy_error) else np.nan,
@@ -447,6 +555,7 @@ def run_adapt_vqd(context: VQDContext, *, previous_ansatze: list[dict[str, Any]]
             "optimizer_message": str(getattr(result, "message", "")),
             "optimizer_nfev": int(getattr(result, "nfev", -1)),
             "overlaps_with_previous": [float(x) for x in overlaps],
+            "overlaps_with_previous_stderr": [float(x) for x in overlap_stderrs],
             # Ansatz after this iteration, so the state can be rebuilt offline
             # (e.g. fidelity per iteration from the JSON).
             "ops": [int(op) for op in operator_indices],
@@ -471,32 +580,20 @@ def run_adapt_vqd(context: VQDContext, *, previous_ansatze: list[dict[str, Any]]
             operator_index,
             np.array2string(np.asarray(thetas), precision=6),
         )
-        #if previous_objective is not None:
-            # For excited-state VQD, the physical energy can increase while the
-            # penalized objective decreases because the orthogonality penalty is
-            # being reduced. Therefore convergence must be assessed with the
-            # VQD objective, not with the physical energy alone. The
-            # re-evaluated objective is used, not COBYLA's biased minimum.
-            #last_improvement = float(previous_objective) - objective_reevaluated
+        # Stop after `stagnation_patience` consecutive layers without a
+        # significant improvement, keeping the last ansatz.
+        if stagnant_layers >= stagnation_patience:
+            termination_reason = "no_significant_improvement"
+            break
 
-        #stagnant_objective = last_improvement is not None and last_improvement < float(energy_improvement_tol)
-        #tiny_new_parameter = len(thetas) > 0 and abs(float(thetas[-1])) < float(new_theta_tol)
-
-        # Do not stop only because the last theta is tiny: COBYLA and shot-based
-        # objectives can return a near-zero new parameter before the existing
-        # ansatz has fully relaxed. Require objective stagnation as well. (The
-        # small-gradient stop is checked before adding the layer, above.)
-        #if iteration > 0 and stagnant_objective and tiny_new_parameter:
-        #    termination_reason = "stagnant_objective_tiny_theta"
-        #    break
-        #previous_objective = objective_reevaluated
-
-    final_energy = evaluate_energy(context, thetas, operator_indices, cost_mode=cost_mode, energy_shots=energy_shots, n_jobs=workers)
+    final_energy, final_energy_stderr = evaluate_energy_with_error(
+        context, thetas, operator_indices, cost_mode=cost_mode, energy_shots=energy_shots)
     exact_target_energy = float(context.hamiltonian.exact_energies[state_index]) if len(context.hamiltonian.exact_energies) > state_index else np.nan
     energy_error = float(final_energy - exact_target_energy) if np.isfinite(exact_target_energy) else np.nan
     return {
         "state_index": int(state_index),
         "energy": float(final_energy),
+        "energy_stderr": float(final_energy_stderr),
         "exact_energy": exact_target_energy,
         "energy_error": energy_error,
         "abs_energy_error": abs(energy_error) if np.isfinite(energy_error) else np.nan,
@@ -521,12 +618,15 @@ def run_adapt_vqd(context: VQDContext, *, previous_ansatze: list[dict[str, Any]]
         "max_adapt_iter": int(max_adapt_iter),
         "max_candidates": None if max_candidates is None else int(max_candidates),
         "grad_tol": float(grad_tol),
-        "new_theta_tol": float(new_theta_tol),
+        "noise_sigmas": float(noise_sigmas),
         "energy_improvement_tol": float(energy_improvement_tol),
+        "stagnation_patience": int(stagnation_patience),
         "beta": float(betas[0]) if betas else 0.0,
         "termination_reason": termination_reason,
         # Gradient that triggered the small_gradient stop (None otherwise).
         "stop_gradient": stop_gradient,
+        "stop_gradient_stderr": stop_gradient_stderr,
+        "stop_gradient_threshold": stop_gradient_threshold,
         "history": history,
         "selection_criterion": str(selection_criterion),
         "gradient_diagnostics": [d.as_row() for d in diagnostics],

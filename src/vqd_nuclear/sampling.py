@@ -216,33 +216,70 @@ def destructive_swap_circuit(circuit_i: Circuit, circuit_k: Circuit, n_qubits: i
     return circuit
 
 
+def destructive_swap_overlap_with_error(circuit_i: Circuit, circuit_k: Circuit, n_qubits: int,
+                                        nshots: int) -> tuple[float, float]:
+    """(estimate of |<psi_i|psi_k>|^2, its standard error), from the shots.
+
+    Each shot is s = (-1)^(a.b), with a, b the two registers; the mean is the
+    overlap. Per-shot variance: 1 - F^2.
+    """
+    n = int(n_qubits)
+    result = destructive_swap_circuit(circuit_i, circuit_k, n)(nshots=int(nshots))
+    f, var, _ = swap_overlap_stats_from_frequencies(result.frequencies(binary=True), n)
+    return f, float(np.sqrt(var))
+
+
 def destructive_swap_overlap(circuit_i: Circuit, circuit_k: Circuit, n_qubits: int,
                              nshots: int) -> float:
     """Estimacion de |<psi_i|psi_k>|^2. Cada shot vale (-1)^(a.b) con a, b los
     dos registros; la media es el solapamiento. Varianza por shot: 1 - F^2.
     """
-    n = int(n_qubits)
-    result = destructive_swap_circuit(circuit_i, circuit_k, n)(nshots=int(nshots))
-    return swap_overlap_from_frequencies(result.frequencies(binary=True), n)
+    f, _ = destructive_swap_overlap_with_error(circuit_i, circuit_k, n_qubits, nshots)
+    return f
 
 
-def swap_overlap_from_frequencies(frequencies, n_qubits: int) -> float:
-    """Media de (-1)^(a.b) sobre los shots: el estimador del SWAP destructivo.
+def swap_overlap_stats_from_counts(n_minus: int, total: int) -> tuple[float, float, int]:
+    """(F, Var(F), n_shots) from n_minus = #(s = -1) and the total number of shots.
+
+        F      = (n - 2 n_minus) / n           (mean of s = +-1)
+        Var(F) = (1 - F^2) / (n - 1)           (variance of the mean, ddof = 1)
+
+    As s^2 = 1, the per-shot sample variance is n (1 - F^2) / (n - 1); dividing
+    by n gives the variance of the mean. Same convention as
+    compute_uncompute_stats_from_counts. Used by both samplers.
+    """
+    total = int(total)
+    n_minus = int(n_minus)
+    if total == 0:
+        raise RuntimeError("No shots in the destructive SWAP.")
+    if not 0 <= n_minus <= total:
+        raise ValueError(f"n_minus = {n_minus} out of range for {total} shots.")
+    f = (total - 2 * n_minus) / total
+    var = max(1.0 - f * f, 0.0) / (total - 1) if total > 1 else 0.0
+    return float(f), float(var), total
+
+
+def swap_overlap_stats_from_frequencies(frequencies, n_qubits: int) -> tuple[float, float, int]:
+    """(F, Var(F), n_shots) of the destructive SWAP from its frequencies.
 
     Las claves tienen 2N bits: los N primeros son el registro a (qubits 0..N-1)
     y los N siguientes el registro b. Lo usan los dos muestreadores.
     """
     n = int(n_qubits)
-    total = 0.0
+    n_minus = 0
     shots = 0
     for key, counts in frequencies.items():
         bits = bitstring_to_array(key, 2 * n)
-        signo = -1.0 if int(np.sum(bits[:n] * bits[n:]) % 2) else 1.0
-        total += signo * int(counts)
+        if int(np.sum(bits[:n] * bits[n:]) % 2):        # s = (-1)^(a.b) = -1
+            n_minus += int(counts)
         shots += int(counts)
-    if shots == 0:
-        raise RuntimeError("No shots in the destructive SWAP.")
-    return float(total / shots)
+    return swap_overlap_stats_from_counts(n_minus, shots)
+
+
+def swap_overlap_from_frequencies(frequencies, n_qubits: int) -> float:
+    """Media de (-1)^(a.b) sobre los shots: el estimador del SWAP destructivo."""
+    f, _, _ = swap_overlap_stats_from_frequencies(frequencies, n_qubits)
+    return f
 
 # =====================================================================
 # Compute-Uncompute : alternative to SWAP for overlap comparison 
@@ -301,11 +338,18 @@ def compute_uncompute_stats_from_frequencies(frequencies, n_qubits: int) -> tupl
     return compute_uncompute_stats_from_counts(n0, total)
 
 
+def compute_uncompute_overlap_with_error(circuit: Circuit, inverse_previous: Circuit,
+                                         n_qubits: int, nshots: int) -> tuple[float, float]:
+    """(estimate of |<psi_j|psi>|^2, its standard error) with compute-uncompute."""
+    result = compute_uncompute_circuit(circuit, inverse_previous, n_qubits)(nshots=int(nshots))
+    f, var, _ = compute_uncompute_stats_from_frequencies(result.frequencies(binary=True), n_qubits)
+    return f, float(np.sqrt(var))
+
+
 def compute_uncompute_overlap(circuit: Circuit, inverse_previous: Circuit, n_qubits: int,
                               nshots: int) -> float:
     """Estimate of |<psi_j|psi>|^2 with compute-uncompute. Only returns the overlap value)."""
-    result = compute_uncompute_circuit(circuit, inverse_previous, n_qubits)(nshots=int(nshots))
-    f, _, _ = compute_uncompute_stats_from_frequencies(result.frequencies(binary=True), n_qubits)
+    f, _ = compute_uncompute_overlap_with_error(circuit, inverse_previous, n_qubits, nshots)
     return f
 
 # =====================================================================
@@ -611,8 +655,9 @@ def sample_penalty_term_from_states(psi: np.ndarray, psi_previous: np.ndarray, p
     return m, var
 
 
-def destructive_swap_overlap_from_states(psi_i: np.ndarray, psi_k: np.ndarray, n_qubits: int,
-                                         nshots: int, *, rng=None) -> float:
+def destructive_swap_overlap_with_error_from_states(psi_i: np.ndarray, psi_k: np.ndarray,
+                                                    n_qubits: int, nshots: int, *,
+                                                    rng=None) -> tuple[float, float]:
     """SWAP destructivo a partir de los dos estados: el mismo circuito de 2N qubits.
 
     Registro a (qubits 0..N-1) = psi_i y registro b (N..2N-1) = psi_k, es decir
@@ -627,12 +672,21 @@ def destructive_swap_overlap_from_states(psi_i: np.ndarray, psi_k: np.ndarray, n
     layer = [gate for q in range(n) for gate in (("CNOT", q, q + n), ("H", q))]
     phi = apply_circuit(phi, layer, 2 * n)
     frequencies = born_frequencies(phi, 2 * n, range(2 * n), nshots, rng=rng)
-    return swap_overlap_from_frequencies(frequencies, n)
+    f, var, _ = swap_overlap_stats_from_frequencies(frequencies, n)
+    return f, float(np.sqrt(var))
 
 
-def compute_uncompute_overlap_from_states(psi: np.ndarray, psi_previous: np.ndarray, n_qubits: int,
-                                          nshots: int, *, rng=None) -> float:
-    """Compute-uncompute from the two states.
+def destructive_swap_overlap_from_states(psi_i: np.ndarray, psi_k: np.ndarray, n_qubits: int,
+                                         nshots: int, *, rng=None) -> float:
+    """Only the value of destructive_swap_overlap_with_error_from_states."""
+    f, _ = destructive_swap_overlap_with_error_from_states(psi_i, psi_k, n_qubits, nshots, rng=rng)
+    return f
+
+
+def compute_uncompute_overlap_with_error_from_states(psi: np.ndarray, psi_previous: np.ndarray,
+                                                     n_qubits: int, nshots: int, *,
+                                                     rng=None) -> tuple[float, float]:
+    """Compute-uncompute from the two states: (F estimate, standard error).
 
     Before measuring, the state is U_j^dag|psi>, and its amplitude on 0^N is
     <0^N|U_j^dag|psi> = <psi_j|psi>, so P(x = 0^N) = F = |<psi_j|psi>|^2.
@@ -651,5 +705,13 @@ def compute_uncompute_overlap_from_states(psi: np.ndarray, psi_previous: np.ndar
             raise ValueError(f"{name} not normalized (norm^2 = {norm}).")
     f_exact = min(max(abs(np.vdot(psi_previous, psi)) ** 2, 0.0), 1.0)
     n0 = _generator(rng).binomial(int(nshots), f_exact)
-    f, _, _ = compute_uncompute_stats_from_counts(n0, int(nshots))
-    return f
+    f, var, _ = compute_uncompute_stats_from_counts(n0, int(nshots))
+    return f, float(np.sqrt(var))
+
+
+def compute_uncompute_overlap_from_states(psi: np.ndarray, psi_previous: np.ndarray, n_qubits: int,
+                                          nshots: int, *, rng=None) -> float:
+    """Only the value of compute_uncompute_overlap_with_error_from_states."""
+    f, _ = compute_uncompute_overlap_with_error_from_states(psi, psi_previous, n_qubits,
+                                                            nshots, rng=rng)
+    return f
