@@ -47,6 +47,16 @@ GUARDAS
 En los dos casos el fallback es el camino completo: una hipotesis incorrecta
 cuesta velocidad, nunca correctitud.
 
+3. The reduced propagation applies exp(PHASE theta T_S) for the WHOLE generator,
+   while the circuit applies the product of the exponentials of its Pauli
+   strings. Both coincide only if the strings of the generator commute, which
+   is checked when the generator is projected (`circuit_equivalent`). The
+   leakage check does not detect this.
+
+If guard 2 fails, `state` raises ModelSpaceUnavailable and disables the engine:
+the caller must redo that operation with the full circuit (see
+MeasurementEngine.model_space_states).
+
 Uso como script (valida contra el camino actual):
     python model_space.py --shell p --protons 2 --neutrons 0 --J 0
 """
@@ -54,7 +64,9 @@ from __future__ import annotations
 
 import logging
 from collections import OrderedDict
+from operator import index as integer_index
 from dataclasses import dataclass
+from itertools import combinations
 
 from .conventions import ANSATZ_DERIVATIVE_PHASE
 
@@ -64,6 +76,25 @@ import numpy as np
 LOGGER = logging.getLogger(__name__)
 
 LEAK_TOL = 1e-10
+
+
+class ModelSpaceUnavailable(RuntimeError):
+    """The reduced route cannot be used for this operation: the caller must
+    redo it with the full circuit."""
+
+
+def generator_terms_commute(qubit_operator) -> bool:
+    """True if all the Pauli strings of the operator commute pairwise.
+
+    Two strings commute if the number of qubits where both are non-identity
+    and different is even. Checked on the FULL strings, not on the projected
+    block: the circuit applies each string separately.
+    """
+    terms = [dict(term) for term, coefficient in qubit_operator.terms.items()
+             if complex(coefficient) != 0]
+    return all(sum(a[q] != b[q] for q in a.keys() & b.keys()
+                   if a[q] != "I" and b[q] != "I") % 2 == 0
+               for a, b in combinations(terms, 2))
 
 
 # =====================================================================
@@ -104,24 +135,70 @@ def project_operator(qubit_operator, indices: np.ndarray, n_qubits: int,
     determinante. Si no es ~0, el operador no conserva el subespacio y no se
     puede proyectar.
 
-    Cuesta d aplicaciones del operador. Se paga una vez por operador.
+    Aplica las cadenas directamente a los indices computacionales: no reserva
+    vectores de longitud 2**n_qubits ni llama a apply_operator. Este argumento
+    se conserva para mantener la interfaz de los llamantes existentes.
     """
-    d = int(len(indices))
-    dimension = 2 ** int(n_qubits)
+    try:
+        n_qubits = integer_index(n_qubits)
+    except TypeError as exc:
+        raise ValueError("n_qubits must be a nonnegative integer.") from exc
+    if n_qubits < 0:
+        raise ValueError("n_qubits must be a nonnegative integer.")
+    raw_indices = np.asarray(indices)
+    if raw_indices.ndim != 1:
+        raise ValueError("Model-space indices must be one-dimensional.")
+    try:
+        basis_indices = [integer_index(value) for value in raw_indices]
+    except TypeError as exc:
+        raise ValueError("Model-space indices must be integers.") from exc
+    if any(value < 0 or value >= (1 << n_qubits) for value in basis_indices):
+        raise ValueError("Model-space index is outside the qubit register.")
+    if len(set(basis_indices)) != len(basis_indices):
+        raise ValueError("Model-space indices must not contain duplicates.")
+    positions = {value: row for row, value in enumerate(basis_indices)}
+
+    # Compile masks once. Y contributes i, a sign from the original bit, and
+    # a flip; Z contributes only that sign. Qibo's qubit 0 is the high bit.
+    terms = []
+    for pauli_string, coefficient in qubit_operator.terms.items():
+        coefficient = complex(coefficient)
+        if not np.isfinite(coefficient):
+            raise ValueError("Pauli coefficients must be finite.")
+        flip_mask, sign_mask, n_y = 0, 0, 0
+        for qubit, pauli in pauli_string:
+            try:
+                qubit = integer_index(qubit)
+            except TypeError as exc:
+                raise ValueError("Pauli qubit indices must be integers.") from exc
+            if not 0 <= qubit < n_qubits:
+                raise ValueError("Pauli qubit index is outside the qubit register.")
+            if pauli not in {"I", "X", "Y", "Z"}:
+                raise ValueError(f"Unsupported Pauli operator: {pauli}")
+            mask = 1 << (n_qubits - 1 - qubit)
+            if pauli in {"X", "Y"}:
+                flip_mask ^= mask
+            if pauli in {"Y", "Z"}:
+                sign_mask ^= mask
+            n_y += pauli == "Y"
+        terms.append((flip_mask, sign_mask, coefficient * (1j ** n_y)))
+
+    d = len(basis_indices)
     o_s = np.zeros((d, d), dtype=complex)
-
-    fuera = np.ones(dimension, dtype=bool)
-    fuera[indices] = False
-
     fuga = 0.0
-    vector = np.zeros(dimension, dtype=complex)
-    for b, indice_b in enumerate(indices):
-        vector[:] = 0.0
-        vector[int(indice_b)] = 1.0
-        imagen = apply_operator(qubit_operator, vector, n_qubits)
-        o_s[:, b] = imagen[indices]
-        if fuera.any():
-            fuga = max(fuga, float(np.max(np.abs(imagen[fuera]))))
+    for column, source in enumerate(basis_indices):
+        outside = {}
+        for flip_mask, sign_mask, coefficient in terms:
+            target = source ^ flip_mask
+            amplitude = -coefficient if (source & sign_mask).bit_count() % 2 else coefficient
+            row = positions.get(target)
+            if row is None:
+                outside[target] = outside.get(target, 0.0j) + amplitude
+            else:
+                o_s[row, column] += amplitude
+        # Contributions must cancel before measuring leakage, not afterwards.
+        if outside:
+            fuga = max(fuga, float(max(abs(value) for value in outside.values())))
     return o_s, fuga
 
 
@@ -141,6 +218,7 @@ class ProjectedGenerator:
     eigenvalues: np.ndarray        # (d,) reales
     eigenvectors: np.ndarray       # (d,d) unitaria
     preserves_space: bool
+    circuit_equivalent: bool = True    # its Pauli strings commute pairwise
 
     @classmethod
     def from_operator(cls, qubit_operator, indices, n_qubits, apply_operator,
@@ -154,12 +232,21 @@ class ProjectedGenerator:
             )
         valores, vectores = np.linalg.eigh(t_s)
         return cls(eigenvalues=valores, eigenvectors=vectores,
-                   preserves_space=bool(fuga <= leak_tol))
+                   preserves_space=bool(fuga <= leak_tol),
+                   circuit_equivalent=generator_terms_commute(qubit_operator))
 
     def apply(self, theta: float, psi_s: np.ndarray) -> np.ndarray:
         """exp(PHASE * theta * T_S) |psi_S>, en dos productos matriz-vector."""
         fases = np.exp(ANSATZ_DERIVATIVE_PHASE * float(theta) * self.eigenvalues)
         return self.eigenvectors @ (fases * (self.eigenvectors.conj().T @ psi_s))
+
+    def action(self, psi_s: np.ndarray) -> np.ndarray:
+        """T_S |psi_S>, WITHOUT the phase (the a_psi of commutator_energy_gradient).
+
+        The derivative of the state is ANSATZ_DERIVATIVE_PHASE * action(psi_s);
+        the phase is applied by the caller, once.
+        """
+        return self.eigenvectors @ (self.eigenvalues * (self.eigenvectors.conj().T @ psi_s))
 
 
 # =====================================================================
@@ -222,13 +309,32 @@ class ModelSpaceEngine:
                     "que lo usen iran por el camino completo. Esto merece "
                     "investigarse: es un hallazgo de fisica, no solo de rendimiento.",
                     mu)
+            if not self._generators[mu].circuit_equivalent:
+                LOGGER.warning(
+                    "Generator %d has non-commuting Pauli strings: exp(theta T) differs "
+                    "from the circuit (product of exponentials). Ansatze that use it "
+                    "go through the full route.", mu)
         return self._generators[mu]
 
     def can_handle(self, operator_indices) -> bool:
         """True si se puede propagar este ansatz dentro del subespacio."""
         if not self.available:
             return False
-        return all(self.generator(mu).preserves_space for mu in operator_indices)
+        return all(self.generator(mu).preserves_space and self.generator(mu).circuit_equivalent
+                   for mu in operator_indices)
+
+    def _checked_state(self, state: np.ndarray) -> np.ndarray:
+        """Guard 2: the reduced state must have norm 1. If not, the engine is
+        disabled (available = False, cache emptied) and ModelSpaceUnavailable
+        is raised, so the caller redoes the operation with the full circuit."""
+        norm_squared = float(np.vdot(state, state).real)
+        if not np.isfinite(norm_squared) or abs(1.0 - norm_squared) > LEAK_TOL:
+            self.available = False
+            self._cache.clear()
+            LOGGER.warning("Reduced-state norm check failed (norm^2 = %s): model-space "
+                           "evaluation disabled, using the full circuit.", norm_squared)
+            raise ModelSpaceUnavailable("Reduced-state normalization failed.")
+        return state
 
     @staticmethod
     def _key(thetas, operator_indices, ndigits: int = 12):
@@ -248,16 +354,23 @@ class ModelSpaceEngine:
 
         Sustituye a construir y simular el circuito de Qibo.
         """
+        if len(thetas) != len(operator_indices):
+            raise ValueError("Each operator of the ansatz needs exactly one parameter.")
+        if any(not 0 <= int(mu) < len(self.qubit_generator_pool) for mu in operator_indices):
+            raise ValueError("Operator index outside the pool.")
+        if not self.can_handle(operator_indices):
+            raise ModelSpaceUnavailable("This ansatz cannot be propagated in the model space.")
         key = self._key(thetas, operator_indices)
         cacheado = self._cache.get(key)
         if cacheado is not None:
             self._cache.move_to_end(key)
-            return cacheado
+            return self._checked_state(cacheado)
 
         psi_s = self.reference_s.copy()
         for theta, mu in zip(thetas, operator_indices):
             psi_s = self.generator(int(mu)).apply(float(theta), psi_s)
 
+        self._checked_state(psi_s)
         self._cache_set(key, psi_s)
         return psi_s
 

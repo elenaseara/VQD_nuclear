@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from .conventions import ANSATZ_DERIVATIVE_PHASE
+from .model_space import ModelSpaceUnavailable
 from .measurement_plan import (build_energy_measurement_plan,
                                build_gradient_measurement_plan, build_qwc_plan)
 from .pauli_algebra import build_gradient_operator
@@ -149,6 +150,9 @@ class MeasurementEngine:
         # Recuento del consumo de la ruta muestreada: circuitos ejecutados y shots totales.
         self.usage = {"circuits": 0, "shots": 0}
 
+        # Route used by the last statevector candidate scan: "model_space" or "full_state" (2^N).
+        self.last_scan_backend: str | None = None
+
 
     def _count(self, n_circuits: int, nshots: int) -> None:
         self.usage["circuits"] += int(n_circuits)
@@ -167,6 +171,26 @@ class MeasurementEngine:
         while len(self._energy_cache) > self.max_energy_cache_items:
             self._energy_cache.popitem(last=False)
 
+
+    def model_space_states(self, *ansatze) -> list[np.ndarray] | None:
+        """States of all the (thetas, ops) given, in the model-space basis, or
+        None if the full route must be used.
+
+        All or nothing: if any ansatz cannot be propagated in the model space,
+        or the norm check fails (ModelSpaceUnavailable), None is returned for
+        all of them, so the caller never mixes reduced (d) and full (2^N)
+        vectors. After a norm failure the energy cache is emptied as well,
+        because its values may come from the reduced route.
+        """
+        ms = self.model_space
+        if ms is None or not all(ms.can_handle(ops) for _, ops in ansatze):
+            return None
+        try:
+            return [ms.state(thetas, ops) for thetas, ops in ansatze]
+        except ModelSpaceUnavailable:
+            self._energy_cache.clear()
+            return None
+
     """
     *
     """
@@ -177,9 +201,10 @@ class MeasurementEngine:
             self._energy_cache.move_to_end(key)
             return self._energy_cache[key]
 
-        if self.model_space is not None and self.model_space.can_handle(operator_indices):
+        states = self.model_space_states((thetas, operator_indices))
+        if states is not None:
             # Camino rapido: propagar y medir dentro del espacio del modelo.
-            energy = self.model_space.energy(thetas, operator_indices)
+            energy = float(np.vdot(states[0], self.model_space.hamiltonian_s @ states[0]).real)
         else:
             state = self.ansatz_builder.state(thetas, operator_indices)
             energy = qubit_operator_expectation_from_state(
@@ -192,10 +217,9 @@ class MeasurementEngine:
     def exact_overlap(self, thetas_i: list[float], ops_i: list[int], thetas_k: list[float], ops_k: list[int]) -> float:
         """Compute |<psi_i|psi_k>|^2 exactly from cached simulator statevectors."""
 
-        if (self.model_space is not None
-                and self.model_space.can_handle(ops_i)
-                and self.model_space.can_handle(ops_k)):
-            return self.model_space.overlap(thetas_i, ops_i, thetas_k, ops_k)
+        states = self.model_space_states((thetas_i, ops_i), (thetas_k, ops_k))
+        if states is not None:
+            return float(abs(np.vdot(states[0], states[1])) ** 2)
 
         psi_i = self.ansatz_builder.state(thetas_i, ops_i)
         psi_k = self.ansatz_builder.state(thetas_k, ops_k)
@@ -575,7 +599,8 @@ class MeasurementEngine:
     *
     """
     def scan_candidate_gradients(self, thetas, operator_indices, candidates,
-                                previous_ansatze=None, betas=None) -> CandidateGradientScan:
+                                previous_ansatze=None, betas=None, *,
+                                use_model_space: bool = True) -> CandidateGradientScan:
         """Gradientes de TODOS los candidatos con una sola aplicacion de operador
         por candidato.
     
@@ -594,12 +619,21 @@ class MeasurementEngine:
                 f"Candidatos fuera del pool (tamano {n_pool}): {fuera}. "
                 "El pool del motor y el de HamiltonianData no coinciden."
             )
-    
-        psi = self.ansatz_builder.state(thetas, operator_indices)
-        h_psi = apply_qubit_operator_to_state(self.qubit_hamiltonian, psi, self.n_qubits)
-    
-        previous_states = [self.ansatz_builder.state(p["thetas"], p["ops"])
-                        for p in previous_ansatze]
+        
+        states = (self.model_space_states((thetas, operator_indices),
+                                          *((p["thetas"], p["ops"]) for p in previous_ansatze))
+                  if use_model_space else None)
+        reduced = states is not None
+        if reduced:
+            ms = self.model_space
+            psi, *previous_states = states
+            h_psi = ms.hamiltonian_s @ psi
+        else:
+            psi = self.ansatz_builder.state(thetas, operator_indices)
+            h_psi = apply_qubit_operator_to_state(self.qubit_hamiltonian, psi, self.n_qubits)
+            previous_states = [self.ansatz_builder.state(p["thetas"], p["ops"])
+                            for p in previous_ansatze]
+        self.last_scan_backend = "model_space" if reduced else "full_state"
         
         amplitudes = [np.vdot(prev, psi) for prev in previous_states]
         max_overlap = max((abs(a) for a in amplitudes), default=0.0)
@@ -610,7 +644,10 @@ class MeasurementEngine:
         g_total: dict[int, float] = {}
         for mu in candidates:
             generator = self.qubit_generator_pool[int(mu)]
-            a_psi = apply_qubit_operator_to_state(generator, psi, self.n_qubits)
+            if reduced:
+                a_psi = ms.generator(int(mu)).action(psi)       # A_S psi, no phase
+            else:
+                a_psi = apply_qubit_operator_to_state(generator, psi, self.n_qubits)
 
             g_energy[int(mu)], g_penalty[int(mu)], g_total[int(mu)] = self.statevector_vqd_gradient(thetas, operator_indices, 
                                                                                                     generator, previous_states, betas,
